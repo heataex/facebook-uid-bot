@@ -842,62 +842,64 @@ async def send_notification(telegram_id: int, uid_data: Dict):
 
 # ========== MAIN APPLICATION ==========
 async def main():
-    """Hàm khởi chạy chính - Đã sửa lỗi JobQueue cho Railway"""
-    # Configure logging
+    """Hàm khởi chạy chính - Đã sửa lỗi JobQueue và Event Loop cho Railway"""
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=getattr(logging, LOG_LEVEL)
     )
     
-    # Khởi tạo database
     init_database()
     
-    # 1. Khởi tạo application (Tự động thiết lập JobQueue nếu có trong requirements)
+    # 1. Khởi tạo application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # 2. Thiết lập JobQueue (Sửa lỗi NoneType)
-    if application.job_queue:
-        application.job_queue.run_repeating(
-            check_all_uids, # Đảm bảo tên hàm này khớp với hàm check của bạn
-            interval=CHECK_INTERVAL_MINUTES * 60, 
-            first=10
-        )
-        logging.info("✅ JobQueue đã được kích hoạt thành công.")
-    else:
-        logging.error("❌ JobQueue bị None. Hãy kiểm tra requirements.txt")
-
-    # Đăng ký các Handler (Giữ nguyên logic của bạn)
+    # 2. Đăng ký các Handler (Giữ nguyên các handler bạn đã có)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("list", list_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    # ... Đăng ký thêm các handler khác của bạn ở đây ...
+    # ... thêm các handler khác của bạn tại đây ...
 
-    # 3. Khởi chạy bot thủ công để tránh lỗi 'Event loop already running'
+    # 3. Khởi chạy bot bằng phương thức 'async with' để quản lý vòng lặp an toàn
     async with application:
         await application.initialize()
         await application.start()
         
-        logging.info("🚀 Bot đang lắng nghe tin nhắn trên Railway...")
+        # Thiết lập JobQueue nếu có hàm quét UID
+        if application.job_queue:
+            # Thay 'check_all_uids' bằng tên chính xác hàm quét của bạn
+            application.job_queue.run_repeating(
+                check_all_uids, 
+                interval=CHECK_INTERVAL_MINUTES * 60, 
+                first=10
+            )
+            logging.info("✅ JobQueue đã được thiết lập.")
+
+        logging.info("🚀 Bot đang chạy và lắng nghe tin nhắn...")
         await application.updater.start_polling()
         
+        # Giữ bot chạy liên tục
         try:
             while True:
                 await asyncio.sleep(3600)
         except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
             logging.info("👋 Đang dừng bot...")
         finally:
+            # Dọn dẹp tài nguyên đúng cách
             await application.updater.stop()
             await application.stop()
             await application.shutdown()
 
 if __name__ == "__main__":
-    # Cách chạy này tương thích với môi trường server
+    # Giải quyết triệt để lỗi 'This event loop is already running'
     try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        if "already running" in str(e):
-            loop = asyncio.get_event_loop()
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Nếu loop đang chạy (trên Server), tạo task mới
             loop.create_task(main())
         else:
-            raise e
+            # Nếu loop chưa chạy, chạy cho đến khi hoàn thành
+            loop.run_until_complete(main())
+    except RuntimeError:
+        # Nếu chưa có loop nào, khởi tạo mới hoàn toàn
+        asyncio.run(main())
