@@ -1023,22 +1023,14 @@ def main():
     notifier = Notifier(BOT_TOKEN)
     
     # Schedule tasks
-    async def scheduled_tasks():
-        """Run scheduled tasks"""
-        while True:
-            try:
-                # Send key expiration notifications
-                await notifier.send_key_expiration_notifications()
-                
-                # Update daily stats (once per day)
-                if datetime.now().hour == 0:  # Midnight
-                    StatsManager.update_daily_stats()
-                
-            except Exception as e:
-                logging.error(f"Scheduled task error: {e}")
-            
-            # Wait 1 hour before next check
-            await asyncio.sleep(3600)
+    async def scheduled_tasks(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        # check UID live/die
+        # check key hết hạn
+        logging.info("Scheduled check running...")
+    except Exception as e:
+        logging.error(f"Scheduled task error: {e}")
+
     
     # Run bot
     logging.info("Bot is starting with premium features...")
