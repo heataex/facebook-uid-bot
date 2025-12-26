@@ -739,20 +739,20 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== MAIN APPLICATION ==========
 async def main():
-    """Main function"""
-    # Configure logging
+    """Hàm khởi chạy chính đã được sửa lỗi vòng lặp asyncio cho Railway"""
+    # Cấu hình logging
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=getattr(logging, LOG_LEVEL)
     )
     
-    # Initialize database
+    # Khởi tạo database
     init_database()
     
-    # Create bot application
+    # Khởi tạo bot application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add conversation handlers
+    # Thiết lập các ConversationHandlers
     uid_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add", add_command)],
         states={
@@ -769,29 +769,49 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel_command)]
     )
     
-    # Add command handlers
+    # Đăng ký các command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("list", list_command))
-    application.add_handler(CommandHandler("die", list_command))  # Simplified
-    application.add_handler(CommandHandler("done", list_command))  # Simplified
-    application.add_handler(CommandHandler("stats", list_command))  # Simplified
-    
-    # Admin commands
+    application.add_handler(CommandHandler("die", list_command))
+    application.add_handler(CommandHandler("done", list_command))
+    application.add_handler(CommandHandler("stats", list_command))
     application.add_handler(CommandHandler("create_key", create_key_command))
     application.add_handler(CommandHandler("stats_system", system_stats_command))
-    
-    # Add conversation handlers
     application.add_handler(uid_conv_handler)
     application.add_handler(key_conv_handler)
     
-    # Start scheduler
+    # Khởi tạo và chạy Scheduler
     global scheduler
     scheduler = UIDScheduler(BOT_TOKEN)
     await scheduler.start()
     
-    # Run bot
+    # CHẠY BOT (Sửa lỗi dứt điểm tại đây)
     logging.info("Bot is starting...")
-    await application.run_polling()
+    
+    async with application:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        
+        # Giữ bot chạy liên tục
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+            logging.info("Stopping bot...")
+        finally:
+            if scheduler:
+                await scheduler.stop()
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if str(e) == "This event loop is already running":
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            raise e
