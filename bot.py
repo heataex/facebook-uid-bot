@@ -858,7 +858,7 @@ async def main():
     # 2. Thiết lập JobQueue (Sửa lỗi NoneType)
     if application.job_queue:
         application.job_queue.run_repeating(
-            check_all_uids_job, # Đảm bảo tên hàm này khớp với hàm check của bạn
+            check_all_uids, # Đảm bảo tên hàm này khớp với hàm check của bạn
             interval=CHECK_INTERVAL_MINUTES * 60, 
             first=10
         )
