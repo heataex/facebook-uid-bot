@@ -1,6 +1,6 @@
 """
-Facebook UID Tracker Bot - Premium Version
-Với Dashboard, Report, UX/UI cải thiện
+Facebook UID Tracker Bot - Railway Fixed Version
+FIXED: RuntimeError: This event loop is already running
 """
 
 import os
@@ -9,9 +9,8 @@ import asyncio
 import sqlite3
 import httpx
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from enum import Enum
-import calendar
+from typing import Dict, List, Optional, Tuple
+import json
 
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -23,7 +22,6 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
-from telegram.error import TelegramError
 
 # ========== CONFIGURATION ==========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -34,106 +32,74 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 # ========== DATABASE ==========
 DB_FILE = "/tmp/bot_data.db"
 
-class StatusEnum(str, Enum):
-    LIVE = "LIVE"
-    DIE = "DIE"
-
-class KeyStatusEnum(str, Enum):
-    ACTIVE = "ACTIVE"
-    EXPIRED = "EXPIRED"
-    DISABLED = "DISABLED"
-
 def init_database():
-    """Khởi tạo database với các bảng mới"""
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    c = conn.cursor()
-    
-    # Bảng users
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id TEXT UNIQUE NOT NULL,
-            username TEXT,
-            first_name TEXT,
-            role TEXT DEFAULT 'USER',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_active BOOLEAN DEFAULT 1,
-            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Bảng keys với notification status
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS access_keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key_value TEXT UNIQUE NOT NULL,
-            owner_id INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            expired_at TIMESTAMP NOT NULL,
-            status TEXT DEFAULT 'ACTIVE',
-            notes TEXT,
-            notify_3_days BOOLEAN DEFAULT 0,
-            notify_1_day BOOLEAN DEFAULT 0,
-            FOREIGN KEY (owner_id) REFERENCES users (id)
-        )
-    ''')
-    
-    # Bảng uids với notes và tags
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS facebook_uids (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT NOT NULL,
-            customer_name TEXT NOT NULL,
-            amount REAL NOT NULL,
-            current_status TEXT DEFAULT 'DIE',
-            last_status TEXT,
-            receive_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            done_date TIMESTAMP,
-            last_check_time TIMESTAMP,
-            owner_id INTEGER NOT NULL,
-            key_id INTEGER NOT NULL,
-            notes TEXT,
-            tags TEXT DEFAULT '[]',
-            is_active BOOLEAN DEFAULT 1,
-            check_count INTEGER DEFAULT 0,
-            is_vip BOOLEAN DEFAULT 0,
-            FOREIGN KEY (owner_id) REFERENCES users (id),
-            FOREIGN KEY (key_id) REFERENCES access_keys (id),
-            UNIQUE(uid, key_id)
-        )
-    ''')
-    
-    # Bảng daily stats cho report nhanh
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date DATE NOT NULL,
-            total_uids INTEGER DEFAULT 0,
-            live_uids INTEGER DEFAULT 0,
-            die_uids INTEGER DEFAULT 0,
-            done_today INTEGER DEFAULT 0,
-            amount_today REAL DEFAULT 0,
-            UNIQUE(date)
-        )
-    ''')
-    
-    # Indexes
-    indexes = [
-        'CREATE INDEX IF NOT EXISTS idx_uids_key ON facebook_uids(key_id)',
-        'CREATE INDEX IF NOT EXISTS idx_uids_status ON facebook_uids(current_status)',
-        'CREATE INDEX IF NOT EXISTS idx_keys_expired ON access_keys(expired_at)',
-        'CREATE INDEX IF NOT EXISTS idx_uids_done_date ON facebook_uids(done_date)',
-        'CREATE INDEX IF NOT EXISTS idx_uids_owner ON facebook_uids(owner_id)',
-        'CREATE INDEX IF NOT EXISTS idx_daily_stats_date ON daily_stats(date)'
-    ]
-    
-    for idx in indexes:
-        c.execute(idx)
-    
-    conn.commit()
-    conn.close()
-    
-    logging.info("Database initialized with premium features")
+    """Khởi tạo database đơn giản cho Railway"""
+    try:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        c = conn.cursor()
+        
+        # Bảng users
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id TEXT UNIQUE NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                role TEXT DEFAULT 'USER',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT 1
+            )
+        ''')
+        
+        # Bảng keys
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS access_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_value TEXT UNIQUE NOT NULL,
+                owner_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expired_at TIMESTAMP NOT NULL,
+                status TEXT DEFAULT 'ACTIVE',
+                notes TEXT,
+                FOREIGN KEY (owner_id) REFERENCES users (id)
+            )
+        ''')
+        
+        # Bảng uids
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS facebook_uids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid TEXT NOT NULL,
+                customer_name TEXT NOT NULL,
+                amount REAL NOT NULL,
+                current_status TEXT DEFAULT 'DIE',
+                last_status TEXT,
+                receive_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                done_date TIMESTAMP,
+                last_check_time TIMESTAMP,
+                owner_id INTEGER,
+                key_id INTEGER,
+                is_active BOOLEAN DEFAULT 1,
+                check_count INTEGER DEFAULT 0,
+                notes TEXT,
+                FOREIGN KEY (owner_id) REFERENCES users (id),
+                FOREIGN KEY (key_id) REFERENCES access_keys (id),
+                UNIQUE(uid, key_id)
+            )
+        ''')
+        
+        # Indexes
+        c.execute('CREATE INDEX IF NOT EXISTS idx_uids_key ON facebook_uids(key_id)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_uids_status ON facebook_uids(current_status)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_keys_expired ON access_keys(expired_at)')
+        
+        conn.commit()
+        conn.close()
+        
+        logging.info("Database initialized successfully")
+        
+    except Exception as e:
+        logging.error(f"Database init error: {e}")
 
 def get_db():
     """Get database connection"""
@@ -141,847 +107,533 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# ========== UI FORMATTER ==========
-class UIFormatter:
-    """Class định dạng tin nhắn đẹp cho Telegram"""
+# ========== SIMPLE CHECKER ==========
+class FacebookChecker:
+    """Simple Facebook UID checker"""
     
-    @staticmethod
-    def separator(emoji: str = "━", length: int = 25) -> str:
-        """Tạo separator line"""
-        return emoji * length
+    def __init__(self):
+        self.client = None
+        self.rate_limit = 1.0  # seconds between requests
     
-    @staticmethod
-    def format_done_message(uid_data: Dict) -> str:
-        """Format message khi DONE kèo"""
-        amount = uid_data['amount']
-        amount_str = f"{amount:,.0f}đ".replace(",", ".")
-        
-        receive_date = datetime.fromisoformat(uid_data['receive_date']) if 'T' in uid_data['receive_date'] else datetime.strptime(uid_data['receive_date'], '%Y-%m-%d %H:%M:%S')
-        done_date = uid_data.get('done_date')
-        if done_date:
-            done_date = datetime.fromisoformat(done_date) if 'T' in done_date else datetime.strptime(done_date, '%Y-%m-%d %H:%M:%S')
-        else:
-            done_date = datetime.now()
-        
-        return (
-            f"{UIFormatter.separator('━', 30)}\n"
-            f"✅ *DONE KÈO FACEBOOK*\n"
-            f"{UIFormatter.separator('━', 30)}\n"
-            f"👤 *Khách hàng:* {uid_data['customer_name']}\n"
-            f"🆔 *UID:* `{uid_data['uid']}`\n"
-            f"💰 *Số tiền:* {amount_str}\n\n"
-            f"📅 *Ngày nhận:* {receive_date.strftime('%d/%m/%Y')}\n"
-            f"🎉 *Ngày DONE:* {done_date.strftime('%d/%m/%Y %H:%M')}\n"
-            f"{UIFormatter.separator('━', 30)}"
-        )
-    
-    @staticmethod
-    def format_stats_message(stats: Dict, user_telegram_id: str = None) -> str:
-        """Format message thống kê"""
-        today = datetime.now().strftime('%d/%m/%Y')
-        
-        # Status emojis
-        live_emoji = "🟢"
-        die_emoji = "🔴"
-        done_emoji = "🎯"
-        total_emoji = "📊"
-        
-        message = f"📈 *THỐNG KÊ HỆ THỐNG*\n{UIFormatter.separator('━', 25)}\n"
-        
-        if user_telegram_id:
-            message += f"👤 *User:* {user_telegram_id}\n{UIFormatter.separator('━', 25)}\n"
-        
-        message += (
-            f"{total_emoji} *Tổng UID:* {stats.get('total', 0)}\n"
-            f"{live_emoji} *LIVE:* {stats.get('live', 0)}\n"
-            f"{die_emoji} *DIE:* {stats.get('die', 0)}\n"
-            f"{done_emoji} *DONE hôm nay:* {stats.get('done_today', 0)}\n"
-            f"💰 *Tổng tiền hôm nay:* {stats.get('amount_today', 0):,.0f}đ\n"
-            f"🔄 *Check count:* {stats.get('total_checks', 0)}\n"
-            f"{UIFormatter.separator('━', 25)}\n"
-            f"📅 *Ngày:* {today}"
-        )
-        
-        return message
-    
-    @staticmethod
-    def format_uid_list(uids: List[Dict]) -> str:
-        """Format danh sách UID"""
-        if not uids:
-            return f"{UIFormatter.separator('━', 20)}\n📭 *Không có UID nào*\n{UIFormatter.separator('━', 20)}"
-        
-        message = f"📋 *DANH SÁCH UID*\n{UIFormatter.separator('━', 25)}\n"
-        
-        for uid in uids[:15]:  # Giới hạn 15 UID để không quá dài
-            status_emoji = "🟢" if uid['current_status'] == 'LIVE' else "🔴"
-            vip_emoji = "⭐" if uid.get('is_vip') else ""
-            amount_str = f"{uid['amount']:,.0f}đ".replace(",", ".")
-            
-            message += f"{status_emoji}{vip_emoji} UID: `{uid['uid']}` | {amount_str}\n"
-            
-            # Thêm note nếu có
-            if uid.get('notes'):
-                message += f"   📝 {uid['notes'][:30]}...\n"
-        
-        if len(uids) > 15:
-            message += f"\n... và {len(uids) - 15} UID khác"
-        
-        message += f"\n{UIFormatter.separator('━', 25)}"
-        return message
-    
-    @staticmethod
-    def format_key_info(key_data: Dict) -> str:
-        """Format thông tin KEY"""
-        expired_date = datetime.fromisoformat(key_data['expired_at']) if 'T' in key_data['expired_at'] else datetime.strptime(key_data['expired_at'], '%Y-%m-%d %H:%M:%S')
-        days_left = (expired_date - datetime.now()).days
-        
-        status_emoji = "🟢" if key_data['status'] == 'ACTIVE' else "🔴"
-        days_emoji = "⚠️" if days_left <= 3 else "⏳"
-        
-        message = (
-            f"🔑 *THÔNG TIN KEY*\n"
-            f"{UIFormatter.separator('━', 25)}\n"
-            f"📝 *Key:* `{key_data['key_value']}`\n"
-            f"{status_emoji} *Trạng thái:* {key_data['status']}\n"
-            f"👤 *Owner:* @{key_data.get('username', 'N/A')}\n"
-            f"📅 *Ngày tạo:* {key_data['created_at'][:10]}\n"
-            f"{days_emoji} *Hết hạn:* {expired_date.strftime('%d/%m/%Y')}\n"
-            f"⏰ *Còn lại:* {days_left} ngày\n"
-        )
-        
-        # Stats cho key này
-        if 'uid_count' in key_data:
-            message += f"\n📊 *Thống kê KEY:*\n"
-            message += f"   📈 Tổng UID: {key_data.get('uid_count', 0)}\n"
-            message += f"   ✅ LIVE: {key_data.get('live_count', 0)}\n"
-            message += f"   ❌ DIE: {key_data.get('die_count', 0)}\n"
-        
-        message += f"{UIFormatter.separator('━', 25)}"
-        return message
-    
-    @staticmethod
-    def format_daily_report(report_data: List[Dict]) -> str:
-        """Format báo cáo ngày"""
-        today = datetime.now().strftime('%d/%m/%Y')
-        total_amount = sum(item['amount'] for item in report_data)
-        
-        message = (
-            f"📊 *BÁO CÁO NGÀY {today}*\n"
-            f"{UIFormatter.separator('━', 30)}\n"
-        )
-        
-        if not report_data:
-            message += f"📭 *Không có kèo nào DONE hôm nay*\n"
-        else:
-            for i, item in enumerate(report_data, 1):
-                amount_str = f"{item['amount']:,.0f}đ".replace(",", ".")
-                message += (
-                    f"{i}. `{item['uid']}`\n"
-                    f"   👤 {item['customer_name']}\n"
-                    f"   💰 {amount_str}\n"
-                    f"   ⏰ {item.get('done_time', 'N/A')}\n"
+    async def check_uid(self, uid: str) -> str:
+        """Check if UID is LIVE or DIE"""
+        try:
+            if not self.client:
+                self.client = httpx.AsyncClient(
+                    timeout=10,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }
                 )
             
-            message += f"\n💰 *Tổng tiền:* {total_amount:,.0f}đ\n"
-            message += f"🎯 *Tổng kèo:* {len(report_data)}\n"
-        
-        message += f"{UIFormatter.separator('━', 30)}"
-        return message
-    
-    @staticmethod
-    def format_key_expiration_notification(key_data: Dict, days_left: int) -> str:
-        """Format thông báo KEY sắp hết hạn"""
-        if days_left == 3:
-            return (
-                f"⏰ *THÔNG BÁO GIA HẠN KEY*\n"
-                f"{UIFormatter.separator('━', 25)}\n"
-                f"🔑 Key `{key_data['key_value']}` của bạn\n"
-                f"⏳ *Còn {days_left} ngày* sẽ hết hạn\n\n"
-                f"💡 *Lời khuyên:*\n"
-                f"• Liên hệ admin để gia hạn\n"
-                f"• Tránh gián đoạn dịch vụ\n"
-                f"{UIFormatter.separator('━', 25)}"
-            )
-        else:  # 1 day
-            return (
-                f"🚨 *KEY SẮP HẾT HẠN*\n"
-                f"{UIFormatter.separator('━', 25)}\n"
-                f"🔑 Key `{key_data['key_value']}`\n"
-                f"⏳ *Còn 1 ngày* sẽ hết hạn\n\n"
-                f"⚠️ *Cảnh báo:*\n"
-                f"• Dịch vụ sẽ tạm dừng\n"
-                f"• UID sẽ ngừng check\n"
-                f"• Liên hệ admin NGAY\n"
-                f"{UIFormatter.separator('━', 25)}"
-            )
-
-# ========== STATS MANAGER ==========
-class StatsManager:
-    """Quản lý thống kê và báo cáo"""
-    
-    @staticmethod
-    def get_user_stats(telegram_id: str) -> Dict:
-        """Lấy thống kê của user"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        # Get user ID
-        c.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
-        user = c.fetchone()
-        
-        if not user:
-            conn.close()
-            return {}
-        
-        user_id = user['id']
-        today = datetime.now().date().isoformat()
-        
-        # Tổng UID của user
-        c.execute(
-            """SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN current_status = 'LIVE' THEN 1 ELSE 0 END) as live,
-                SUM(CASE WHEN current_status = 'DIE' THEN 1 ELSE 0 END) as die
-             FROM facebook_uids 
-             WHERE owner_id = ? AND is_active = 1""",
-            (user_id,)
-        )
-        basic_stats = dict(c.fetchone())
-        
-        # UID DONE hôm nay
-        c.execute(
-            """SELECT 
-                COUNT(*) as done_today,
-                COALESCE(SUM(amount), 0) as amount_today
-             FROM facebook_uids 
-             WHERE owner_id = ? 
-             AND DATE(done_date) = DATE('now')
-             AND current_status = 'LIVE'""",
-            (user_id,)
-        )
-        today_stats = dict(c.fetchone())
-        
-        # Tổng số lần check
-        c.execute(
-            "SELECT COALESCE(SUM(check_count), 0) as total_checks FROM facebook_uids WHERE owner_id = ?",
-            (user_id,)
-        )
-        checks = dict(c.fetchone())
-        
-        conn.close()
-        
-        return {
-            **basic_stats,
-            **today_stats,
-            **checks
-        }
-    
-    @staticmethod
-    def get_system_stats() -> Dict:
-        """Lấy thống kê toàn hệ thống (admin only)"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        today = datetime.now().date().isoformat()
-        
-        # Total stats
-        c.execute(
-            """SELECT 
-                COUNT(*) as total,
-                SUM(CASE WHEN current_status = 'LIVE' THEN 1 ELSE 0 END) as live,
-                SUM(CASE WHEN current_status = 'DIE' THEN 1 ELSE 0 END) as die
-             FROM facebook_uids WHERE is_active = 1"""
-        )
-        basic_stats = dict(c.fetchone())
-        
-        # Today's done stats
-        c.execute(
-            """SELECT 
-                COUNT(*) as done_today,
-                COALESCE(SUM(amount), 0) as amount_today
-             FROM facebook_uids 
-             WHERE DATE(done_date) = DATE('now')
-             AND current_status = 'LIVE'"""
-        )
-        today_stats = dict(c.fetchone())
-        
-        # Key stats
-        c.execute(
-            """SELECT 
-                COUNT(*) as total_keys,
-                COUNT(CASE WHEN status = 'ACTIVE' AND expired_at > datetime('now') THEN 1 END) as active_keys,
-                COUNT(CASE WHEN expired_at BETWEEN datetime('now') AND datetime('now', '+3 days') THEN 1 END) as expiring_keys
-             FROM access_keys"""
-        )
-        key_stats = dict(c.fetchone())
-        
-        # User stats
-        c.execute(
-            """SELECT 
-                COUNT(*) as total_users,
-                COUNT(CASE WHEN role = 'ADMIN' THEN 1 END) as admin_users
-             FROM users WHERE is_active = 1"""
-        )
-        user_stats = dict(c.fetchone())
-        
-        conn.close()
-        
-        return {
-            **basic_stats,
-            **today_stats,
-            **key_stats,
-            **user_stats
-        }
-    
-    @staticmethod
-    def get_key_stats(key_value: str = None) -> List[Dict]:
-        """Lấy thống kê theo KEY (admin)"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        if key_value:
-            # Stats cho 1 key cụ thể
-            c.execute(
-                """SELECT 
-                    k.key_value,
-                    k.created_at,
-                    k.expired_at,
-                    k.status,
-                    u.username,
-                    COUNT(f.id) as uid_count,
-                    SUM(CASE WHEN f.current_status = 'LIVE' THEN 1 ELSE 0 END) as live_count,
-                    SUM(CASE WHEN f.current_status = 'DIE' THEN 1 ELSE 0 END) as die_count
-                 FROM access_keys k
-                 LEFT JOIN users u ON k.owner_id = u.id
-                 LEFT JOIN facebook_uids f ON k.id = f.key_id
-                 WHERE k.key_value = ?
-                 GROUP BY k.id""",
-                (key_value,)
-            )
-            result = c.fetchone()
-            conn.close()
-            return [dict(result)] if result else []
-        else:
-            # Stats cho tất cả keys
-            c.execute(
-                """SELECT 
-                    k.key_value,
-                    k.created_at,
-                    k.expired_at,
-                    k.status,
-                    u.username,
-                    u.telegram_id,
-                    COUNT(f.id) as uid_count,
-                    SUM(CASE WHEN f.current_status = 'LIVE' THEN 1 ELSE 0 END) as live_count,
-                    (julianday(k.expired_at) - julianday('now')) as days_left
-                 FROM access_keys k
-                 LEFT JOIN users u ON k.owner_id = u.id
-                 LEFT JOIN facebook_uids f ON k.id = f.key_id AND f.is_active = 1
-                 GROUP BY k.id
-                 ORDER BY k.expired_at"""
-            )
-            results = c.fetchall()
-            conn.close()
-            return [dict(row) for row in results]
-    
-    @staticmethod
-    def get_daily_report(telegram_id: str = None) -> List[Dict]:
-        """Lấy báo cáo UID DONE trong ngày"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        today = datetime.now().date().isoformat()
-        
-        if telegram_id:
-            # Report cho user cụ thể
-            c.execute(
-                """SELECT 
-                    f.uid,
-                    f.customer_name,
-                    f.amount,
-                    f.receive_date,
-                    f.done_date,
-                    TIME(f.done_date) as done_time
-                 FROM facebook_uids f
-                 JOIN users u ON f.owner_id = u.id
-                 WHERE u.telegram_id = ?
-                 AND DATE(f.done_date) = DATE('now')
-                 AND f.current_status = 'LIVE'
-                 ORDER BY f.done_date DESC""",
-                (telegram_id,)
-            )
-        else:
-            # Report toàn hệ thống (admin)
-            c.execute(
-                """SELECT 
-                    f.uid,
-                    f.customer_name,
-                    f.amount,
-                    f.receive_date,
-                    f.done_date,
-                    u.telegram_id,
-                    TIME(f.done_date) as done_time
-                 FROM facebook_uids f
-                 JOIN users u ON f.owner_id = u.id
-                 WHERE DATE(f.done_date) = DATE('now')
-                 AND f.current_status = 'LIVE'
-                 ORDER BY f.done_date DESC"""
-            )
-        
-        results = c.fetchall()
-        conn.close()
-        return [dict(row) for row in results]
-    
-    @staticmethod
-    def update_daily_stats():
-        """Cập nhật daily stats (chạy hàng ngày)"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        today = datetime.now().date().isoformat()
-        
-        # Xóa stats cũ nếu có
-        c.execute("DELETE FROM daily_stats WHERE date = ?", (today,))
-        
-        # Tính stats mới
-        c.execute(
-            """INSERT INTO daily_stats (date, total_uids, live_uids, die_uids, done_today, amount_today)
-             SELECT 
-                DATE('now'),
-                COUNT(*) as total_uids,
-                SUM(CASE WHEN current_status = 'LIVE' THEN 1 ELSE 0 END) as live_uids,
-                SUM(CASE WHEN current_status = 'DIE' THEN 1 ELSE 0 END) as die_uids,
-                SUM(CASE WHEN DATE(done_date) = DATE('now') AND current_status = 'LIVE' THEN 1 ELSE 0 END) as done_today,
-                SUM(CASE WHEN DATE(done_date) = DATE('now') AND current_status = 'LIVE' THEN amount ELSE 0 END) as amount_today
-             FROM facebook_uids
-             WHERE is_active = 1"""
-        )
-        
-        conn.commit()
-        conn.close()
-
-# ========== KEY NOTIFICATION MANAGER ==========
-class KeyNotificationManager:
-    """Quản lý thông báo KEY sắp hết hạn"""
-    
-    @staticmethod
-    def check_expiring_keys():
-        """Kiểm tra KEY sắp hết hạn và gửi thông báo"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        # KEY còn 3 ngày
-        c.execute(
-            """SELECT k.*, u.telegram_id 
-             FROM access_keys k
-             JOIN users u ON k.owner_id = u.id
-             WHERE k.status = 'ACTIVE'
-             AND k.expired_at BETWEEN datetime('now', '+3 days') AND datetime('now', '+3 days', '+1 hour')
-             AND k.notify_3_days = 0"""
-        )
-        keys_3_days = c.fetchall()
-        
-        # KEY còn 1 ngày
-        c.execute(
-            """SELECT k.*, u.telegram_id 
-             FROM access_keys k
-             JOIN users u ON k.owner_id = u.id
-             WHERE k.status = 'ACTIVE'
-             AND k.expired_at BETWEEN datetime('now', '+1 day') AND datetime('now', '+1 day', '+1 hour')
-             AND k.notify_1_day = 0"""
-        )
-        keys_1_day = c.fetchall()
-        
-        conn.close()
-        
-        return {
-            '3_days': [dict(row) for row in keys_3_days],
-            '1_day': [dict(row) for row in keys_1_day]
-        }
-    
-    @staticmethod
-    def mark_notification_sent(key_id: int, notification_type: str):
-        """Đánh dấu đã gửi thông báo"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        if notification_type == '3_days':
-            c.execute(
-                "UPDATE access_keys SET notify_3_days = 1 WHERE id = ?",
-                (key_id,)
-            )
-        else:  # 1_day
-            c.execute(
-                "UPDATE access_keys SET notify_1_day = 1 WHERE id = ?",
-                (key_id,)
-            )
-        
-        conn.commit()
-        conn.close()
-
-# ========== KEYBOARD MANAGER ==========
-class KeyboardManager:
-    """Quản lý Inline Keyboard"""
-    
-    @staticmethod
-    def main_menu(is_admin: bool = False) -> InlineKeyboardMarkup:
-        """Tạo main menu keyboard"""
-        keyboard = [
-            [
-                InlineKeyboardButton("➕ Thêm UID", callback_data="add_uid"),
-                InlineKeyboardButton("📋 Danh sách", callback_data="list_uids")
-            ],
-            [
-                InlineKeyboardButton("📊 Thống kê", callback_data="stats"),
-                InlineKeyboardButton("🔑 KEY của tôi", callback_data="my_key")
-            ],
-            [
-                InlineKeyboardButton("📅 Báo cáo ngày", callback_data="daily_report"),
-                InlineKeyboardButton("📝 Ghi chú UID", callback_data="add_note")
+            # Try multiple methods
+            methods = [
+                self._check_profile_page,
+                self._check_graph_api,
+                self._check_mobile_page
             ]
-        ]
-        
-        if is_admin:
-            keyboard.append([
-                InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")
-            ])
-        
-        return InlineKeyboardMarkup(keyboard)
+            
+            for method in methods:
+                result = await method(uid)
+                if result != "ERROR":
+                    return result
+                await asyncio.sleep(0.5)
+            
+            return "DIE"
+            
+        except Exception as e:
+            logging.error(f"Check error for {uid}: {e}")
+            return "DIE"
     
-    @staticmethod
-    def admin_panel() -> InlineKeyboardMarkup:
-        """Tạo admin panel keyboard"""
-        keyboard = [
-            [
-                InlineKeyboardButton("🗝️ Tạo KEY", callback_data="admin_create_key"),
-                InlineKeyboardButton("📊 System Stats", callback_data="admin_system_stats")
-            ],
-            [
-                InlineKeyboardButton("📋 Key Stats", callback_data="admin_key_stats"),
-                InlineKeyboardButton("👥 User List", callback_data="admin_user_list")
-            ],
-            [
-                InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_menu")
-            ]
-        ]
-        return InlineKeyboardMarkup(keyboard)
+    async def _check_profile_page(self, uid: str) -> str:
+        """Check using profile page"""
+        try:
+            url = f"https://www.facebook.com/{uid}"
+            response = await self.client.get(url, follow_redirects=False)
+            
+            if response.status_code in [200, 302]:
+                content = response.text.lower()
+                if "page isn't available" in content or "content not found" in content:
+                    return "DIE"
+                return "LIVE"
+            elif response.status_code == 404:
+                return "DIE"
+            else:
+                return "ERROR"
+                
+        except Exception:
+            return "ERROR"
     
-    @staticmethod
-    def uid_actions_menu(uid_id: int) -> InlineKeyboardMarkup:
-        """Menu actions cho UID"""
-        keyboard = [
-            [
-                InlineKeyboardButton("📝 Thêm ghi chú", callback_data=f"note_{uid_id}"),
-                InlineKeyboardButton("⭐ Đánh dấu VIP", callback_data=f"vip_{uid_id}")
-            ],
-            [
-                InlineKeyboardButton("🛑 Tạm dừng", callback_data=f"pause_{uid_id}"),
-                InlineKeyboardButton("🗑️ Xóa", callback_data=f"delete_{uid_id}")
-            ],
-            [
-                InlineKeyboardButton("⬅️ Back", callback_data="back_to_list")
-            ]
-        ]
-        return InlineKeyboardMarkup(keyboard)
+    async def _check_graph_api(self, uid: str) -> str:
+        """Check using Graph API"""
+        try:
+            url = f"https://graph.facebook.com/{uid}/picture?type=large&redirect=false"
+            response = await self.client.get(url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("data") and data["data"].get("url"):
+                    return "LIVE"
+                else:
+                    return "DIE"
+            else:
+                return "ERROR"
+                
+        except Exception:
+            return "ERROR"
+    
+    async def _check_mobile_page(self, uid: str) -> str:
+        """Check using mobile page"""
+        try:
+            url = f"https://m.facebook.com/{uid}"
+            response = await self.client.get(url, follow_redirects=False)
+            
+            if response.status_code in [200, 302]:
+                return "LIVE"
+            elif response.status_code == 404:
+                return "DIE"
+            else:
+                return "ERROR"
+                
+        except Exception:
+            return "ERROR"
+    
+    async def close(self):
+        """Close HTTP client"""
+        if self.client:
+            await self.client.aclose()
 
-# ========== BOT HANDLERS (UPDATED) ==========
-class BotHandlers:
-    """Class chứa tất cả handlers cho bot"""
+# ========== BOT HANDLERS ==========
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command"""
+    user = update.effective_user
     
-    def __init__(self, bot_token: str):
-        self.bot = Bot(token=bot_token)
-        self.scheduler = None
+    # Save user
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        """INSERT OR IGNORE INTO users (telegram_id, username, first_name) 
+           VALUES (?, ?, ?)""",
+        (str(user.id), user.username, user.first_name)
+    )
+    conn.commit()
+    conn.close()
+    
+    welcome = (
+        "👋 *Chào mừng đến với FB UID Tracker*\n\n"
+        "🔹 *Tính năng:*\n"
+        "• Theo dõi UID LIVE/DIE\n"
+        "• Thông báo realtime\n"
+        "• Quản lý bằng KEY\n\n"
+        "📋 *Lệnh có sẵn:*\n"
+        "/add - Thêm UID mới\n"
+        "/list - Danh sách UID\n"
+        "/stats - Thống kê\n"
+        "/mykey - Thông tin KEY\n"
+        "/help - Hướng dẫn\n\n"
+        f"🔄 Auto-check: {CHECK_INTERVAL_MINUTES} phút"
+    )
+    
+    await update.message.reply_text(welcome, parse_mode="Markdown")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command"""
+    help_text = (
+        "🆘 *HƯỚNG DẪN SỬ DỤNG*\n\n"
+        "1. *Kích hoạt KEY:*\n"
+        "   Liên hệ admin để được cấp KEY\n\n"
+        "2. *Thêm UID:*\n"
+        "   /add\n"
+        "   Format: `UID | Tên KH | Số tiền | Trạng thái`\n"
+        "   Ví dụ: `1000123456789 | Nguyễn Văn A | 500000 | DIE`\n\n"
+        "3. *Theo dõi:*\n"
+        "   • Bot tự động check mỗi {CHECK_INTERVAL_MINUTES} phút\n"
+        "   • Thông báo khi DIE → LIVE\n"
+        "   • /list - Xem danh sách UID\n\n"
+        "4. *Thống kê:*\n"
+        "   • /stats - Xem thống kê\n"
+        "   • /mykey - Thông tin KEY\n\n"
+        "📞 *Hỗ trợ:* Liên hệ admin nếu cần giúp đỡ"
+    )
+    
+    await update.message.reply_text(help_text, parse_mode="Markdown")
+
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /add command"""
+    instructions = (
+        "📝 *THÊM UID MỚI*\n\n"
+        "Nhập theo định dạng:\n\n"
+        "`UID | Tên khách hàng | Số tiền | Trạng thái`\n\n"
+        "*Ví dụ:*\n"
+        "`1000123456789 | Nguyễn Văn A | 500000 | DIE`\n\n"
+        "*Lưu ý:*\n"
+        "• Trạng thái: LIVE hoặc DIE\n"
+        "• Số tiền: VNĐ (không dấu phẩy)"
+    )
+    
+    await update.message.reply_text(instructions, parse_mode="Markdown")
+    return 1  # Conversation state
+
+async def handle_add_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle UID input"""
+    try:
+        text = update.message.text.strip()
+        parts = [p.strip() for p in text.split("|")]
         
-    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Welcome message mới"""
+        if len(parts) != 4:
+            await update.message.reply_text("❌ *Sai định dạng!* Cần 4 phần")
+            return 1
+        
+        uid, customer_name, amount_str, status = parts
+        
+        # Validate
+        if status.upper() not in ["LIVE", "DIE"]:
+            await update.message.reply_text("❌ *Trạng thái* phải là LIVE hoặc DIE")
+            return 1
+        
+        try:
+            amount = float(amount_str.replace(",", ""))
+            if amount <= 0:
+                raise ValueError
+        except:
+            await update.message.reply_text("❌ *Số tiền* không hợp lệ")
+            return 1
+        
+        # Get user info
         user = update.effective_user
-        
-        # Save user
         conn = get_db()
         c = conn.cursor()
+        
+        # Get or create user
         c.execute(
-            """INSERT OR IGNORE INTO users (telegram_id, username, first_name, last_active) 
-               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(telegram_id) DO UPDATE SET 
-               username = excluded.username,
-               last_active = CURRENT_TIMESTAMP""",
-            (str(user.id), user.username, user.first_name)
+            "SELECT id FROM users WHERE telegram_id = ?",
+            (str(user.id),)
         )
-        conn.commit()
-        conn.close()
+        user_data = c.fetchone()
         
-        # Check if user is admin
-        is_admin = int(user.id) in SUPER_ADMIN_IDS
-        
-        welcome_message = (
-            "👋 *Chào mừng đến với FB KÈO BOT*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🔹 *Theo dõi UID LIVE / DIE tự động*\n"
-            "🔹 *DONE kèo thông báo realtime*\n"
-            "🔹 *Minh bạch – Ổn định – Dễ quản lý*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
-        
-        if is_admin:
-            welcome_message += "👑 *Bạn đang đăng nhập với quyền ADMIN*\n\n"
-            welcome_message += "👉 Vui lòng kích hoạt KEY để bắt đầu sử dụng"
-            keyboard = KeyboardManager.main_menu(is_admin=True)
-        else:
-            welcome_message += "👉 Vui lòng kích hoạt KEY để bắt đầu sử dụng"
-            keyboard = KeyboardManager.main_menu(is_admin=False)
-        
-        await update.message.reply_text(
-            welcome_message,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-    
-    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Hiển thị thống kê"""
-        telegram_id = str(update.effective_user.id)
-        is_admin = int(telegram_id) in SUPER_ADMIN_IDS
-        
-        if is_admin:
-            stats = StatsManager.get_system_stats()
-            message = UIFormatter.format_stats_message(stats)
-        else:
-            stats = StatsManager.get_user_stats(telegram_id)
-            message = UIFormatter.format_stats_message(stats, telegram_id)
-        
-        await update.message.reply_text(
-            message,
-            parse_mode="Markdown",
-            reply_markup=KeyboardManager.main_menu(is_admin)
-        )
-    
-    async def daily_report_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Báo cáo UID DONE trong ngày"""
-        telegram_id = str(update.effective_user.id)
-        is_admin = int(telegram_id) in SUPER_ADMIN_IDS
-        
-        if is_admin:
-            report_data = StatsManager.get_daily_report()
-        else:
-            report_data = StatsManager.get_daily_report(telegram_id)
-        
-        message = UIFormatter.format_daily_report(report_data)
-        
-        await update.message.reply_text(
-            message,
-            parse_mode="Markdown",
-            reply_markup=KeyboardManager.main_menu(is_admin)
-        )
-    
-    async def mykey_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Hiển thị thông tin KEY của user"""
-        telegram_id = str(update.effective_user.id)
-        is_admin = int(telegram_id) in SUPER_ADMIN_IDS
-        
-        if is_admin:
-            await update.message.reply_text(
-                "👑 *Bạn là ADMIN*\nKhông cần KEY để sử dụng hệ thống.",
-                parse_mode="Markdown"
+        if not user_data:
+            c.execute(
+                "INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)",
+                (str(user.id), user.username, user.first_name)
             )
-            return
+            user_id = c.lastrowid
+        else:
+            user_id = user_data['id']
         
-        conn = get_db()
-        c = conn.cursor()
-        
-        # Get user's active key
+        # Get active key for user
         c.execute(
-            """SELECT k.*, u.username 
-             FROM access_keys k
-             JOIN users u ON k.owner_id = u.id
-             WHERE u.telegram_id = ?
-             AND k.status = 'ACTIVE'
-             AND k.expired_at > datetime('now')
-             ORDER BY k.expired_at DESC
-             LIMIT 1""",
-            (telegram_id,)
+            """SELECT k.id FROM access_keys k 
+               WHERE k.owner_id = ? 
+               AND k.status = 'ACTIVE'
+               AND k.expired_at > datetime('now')
+               LIMIT 1""",
+            (user_id,)
         )
         key_data = c.fetchone()
-        conn.close()
         
         if not key_data:
             await update.message.reply_text(
-                "❌ *Bạn chưa có KEY active!*\nLiên hệ admin để được cấp KEY.",
+                "❌ *Bạn chưa có KEY hợp lệ!*\nLiên hệ admin để được cấp KEY.",
                 parse_mode="Markdown"
             )
-            return
+            conn.close()
+            return ConversationHandler.END
         
-        key_dict = dict(key_data)
-        # Thêm stats cho key này
-        key_stats = StatsManager.get_key_stats(key_dict['key_value'])
-        if key_stats:
-            key_dict.update(key_stats[0])
+        key_id = key_data['id']
         
-        message = UIFormatter.format_key_info(key_dict)
-        
-        await update.message.reply_text(
-            message,
-            parse_mode="Markdown",
-            reply_markup=KeyboardManager.main_menu(is_admin)
-        )
-    
-    async def admin_key_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin: Xem thống kê theo KEY"""
-        telegram_id = str(update.effective_user.id)
-        
-        if int(telegram_id) not in SUPER_ADMIN_IDS:
-            await update.message.reply_text("❌ Chỉ ADMIN mới có quyền này!")
-            return
-        
-        all_key_stats = StatsManager.get_key_stats()
-        
-        if not all_key_stats:
-            await update.message.reply_text("📭 Không có KEY nào trong hệ thống!")
-            return
-        
-        # Group by status
-        active_keys = [k for k in all_key_stats if k['status'] == 'ACTIVE' and float(k.get('days_left', 0)) > 0]
-        expiring_keys = [k for k in active_keys if float(k.get('days_left', 0)) <= 3]
-        expired_keys = [k for k in all_key_stats if k['status'] != 'ACTIVE' or float(k.get('days_left', 0)) <= 0]
-        
-        message = (
-            "🗝️ *THỐNG KÊ KEY*\n"
-            f"{UIFormatter.separator('━', 25)}\n"
-            f"📊 *Tổng số KEY:* {len(all_key_stats)}\n"
-            f"🟢 *Active:* {len(active_keys)}\n"
-            f"⚠️ *Sắp hết hạn (≤3 ngày):* {len(expiring_keys)}\n"
-            f"🔴 *Hết hạn/vô hiệu:* {len(expired_keys)}\n"
-            f"{UIFormatter.separator('━', 25)}\n"
-        )
-        
-        # Hiển thị KEY sắp hết hạn
-        if expiring_keys:
-            message += "*📌 KEY SẮP HẾT HẠN:*\n"
-            for key in expiring_keys[:5]:  # Hiển thị 5 key đầu
-                days_left = int(float(key.get('days_left', 0)))
-                message += f"• `{key['key_value']}` - Còn {days_left} ngày\n"
-        
-        # Hiển thị KEY mới nhất
-        if active_keys:
-            message += f"\n*📌 KEY ACTIVE MỚI NHẤT:*\n"
-            for key in active_keys[:3]:
-                days_left = int(float(key.get('days_left', 0)))
-                uid_count = key.get('uid_count', 0)
-                message += (
-                    f"• `{key['key_value']}`\n"
-                    f"  👤 @{key.get('username', 'N/A')}\n"
-                    f"  📊 {uid_count} UID | ⏳ {days_left} ngày\n"
-                )
-        
-        await update.message.reply_text(
-            message,
-            parse_mode="Markdown",
-            reply_markup=KeyboardManager.admin_panel()
-        )
-    
-    async def callback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Xử lý inline keyboard callbacks"""
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = str(query.from_user.id)
-        is_admin = int(user_id) in SUPER_ADMIN_IDS
-        
-        callback_data = query.data
-        
-        if callback_data == "add_uid":
-            await self.add_command(query.message, context)
-        elif callback_data == "list_uids":
-            await self.list_command(query.message, context)
-        elif callback_data == "stats":
-            await self.stats_command(query.message, context)
-        elif callback_data == "my_key":
-            await self.mykey_command(query.message, context)
-        elif callback_data == "daily_report":
-            await self.daily_report_command(query.message, context)
-        elif callback_data == "admin_panel":
-            if is_admin:
-                await query.edit_message_text(
-                    "👑 *ADMIN PANEL*",
-                    parse_mode="Markdown",
-                    reply_markup=KeyboardManager.admin_panel()
-                )
-            else:
-                await query.edit_message_text("❌ Không có quyền truy cập!")
-        elif callback_data == "admin_key_stats":
-            await self.admin_key_stats_command(query.message, context)
-        elif callback_data == "back_to_menu":
-            await query.edit_message_text(
-                "🏠 *Main Menu*",
-                parse_mode="Markdown",
-                reply_markup=KeyboardManager.main_menu(is_admin)
+        # Add UID
+        try:
+            c.execute(
+                """INSERT INTO facebook_uids 
+                   (uid, customer_name, amount, current_status, owner_id, key_id) 
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (uid, customer_name, amount, status.upper(), user_id, key_id)
             )
-        elif callback_data.startswith("note_"):
-            uid_id = callback_data.split("_")[1]
-            await query.message.reply_text(
-                f"📝 Nhập ghi chú cho UID {uid_id}:\n"
-                f"(Gửi tin nhắn với format: `{uid_id} | Nội dung ghi chú`)",
-                parse_mode="Markdown"
+            conn.commit()
+            
+            success_msg = (
+                "✅ *ĐÃ THÊM THÀNH CÔNG!*\n\n"
+                f"🆔 *UID:* `{uid}`\n"
+                f"👤 *Khách hàng:* {customer_name}\n"
+                f"💰 *Số tiền:* {amount:,.0f}đ\n"
+                f"📊 *Trạng thái:* {status}\n"
+                f"📅 *Ngày nhận:* {datetime.now().strftime('%d/%m/%Y %H:%M')}"
             )
-    
-    # ... (các hàm khác giữ nguyên)
+            
+            await update.message.reply_text(success_msg, parse_mode="Markdown")
+            
+        except sqlite3.IntegrityError:
+            await update.message.reply_text(f"❌ *UID {uid}* đã tồn tại trong hệ thống của bạn!")
+        
+        conn.close()
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logging.error(f"Add UID error: {e}")
+        await update.message.reply_text("❌ *Có lỗi xảy ra!* Vui lòng thử lại.")
+        return ConversationHandler.END
 
-# ========== UPDATED NOTIFIER ==========
-class Notifier:
-    """Notifier với format mới"""
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list command"""
+    user = update.effective_user
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Get user's UIDs
+    c.execute(
+        """SELECT 
+               f.uid,
+               f.customer_name,
+               f.amount,
+               f.current_status,
+               f.done_date,
+               f.last_check_time
+           FROM facebook_uids f
+           JOIN users u ON f.owner_id = u.id
+           WHERE u.telegram_id = ? 
+           AND f.is_active = 1
+           ORDER BY f.created_at DESC
+           LIMIT 20""",
+        (str(user.id),)
+    )
+    uids = c.fetchall()
+    
+    if not uids:
+        await update.message.reply_text("📭 *Bạn chưa có UID nào!*")
+        conn.close()
+        return
+    
+    # Format message
+    message = "📋 *DANH SÁCH UID*\n━━━━━━━━━━━━━━━━━━━━\n"
+    
+    for uid in uids:
+        status_emoji = "🟢" if uid['current_status'] == 'LIVE' else "🔴"
+        amount_str = f"{uid['amount']:,.0f}đ".replace(",", ".")
+        
+        message += f"{status_emoji} `{uid['uid']}` - {amount_str}\n"
+        
+        if uid['customer_name']:
+            message += f"   👤 {uid['customer_name'][:20]}...\n"
+        
+        if uid['last_check_time']:
+            check_time = uid['last_check_time']
+            if isinstance(check_time, str):
+                check_time = check_time[:16]
+            message += f"   ⏰ {check_time}\n"
+        
+        message += "\n"
+    
+    message += f"━━━━━━━━━━━━━━━━━━━━\n📊 *Tổng:* {len(uids)} UID"
+    
+    await update.message.reply_text(message, parse_mode="Markdown")
+    conn.close()
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /stats command"""
+    user = update.effective_user
+    
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Get user stats
+    c.execute(
+        """SELECT 
+               COUNT(*) as total,
+               SUM(CASE WHEN f.current_status = 'LIVE' THEN 1 ELSE 0 END) as live,
+               SUM(CASE WHEN f.current_status = 'DIE' THEN 1 ELSE 0 END) as die,
+               SUM(CASE WHEN DATE(f.done_date) = DATE('now') THEN f.amount ELSE 0 END) as today_amount
+           FROM facebook_uids f
+           JOIN users u ON f.owner_id = u.id
+           WHERE u.telegram_id = ? 
+           AND f.is_active = 1""",
+        (str(user.id),)
+    )
+    stats = c.fetchone()
+    
+    total = stats['total'] or 0
+    live = stats['live'] or 0
+    die = stats['die'] or 0
+    today_amount = stats['today_amount'] or 0
+    
+    # Get today's done count
+    c.execute(
+        """SELECT COUNT(*) as done_today
+           FROM facebook_uids f
+           JOIN users u ON f.owner_id = u.id
+           WHERE u.telegram_id = ?
+           AND DATE(f.done_date) = DATE('now')
+           AND f.current_status = 'LIVE'""",
+        (str(user.id),)
+    )
+    today_done = c.fetchone()['done_today'] or 0
+    
+    message = (
+        "📊 *THỐNG KÊ CỦA BẠN*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Tổng UID:* {total}\n"
+        f"🟢 *LIVE:* {live}\n"
+        f"🔴 *DIE:* {die}\n"
+        f"🎯 *DONE hôm nay:* {today_done}\n"
+        f"💰 *Tiền hôm nay:* {today_amount:,.0f}đ\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 *Ngày:* {datetime.now().strftime('%d/%m/%Y')}"
+    )
+    
+    await update.message.reply_text(message, parse_mode="Markdown")
+    conn.close()
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /cancel command"""
+    await update.message.reply_text("❌ *Đã hủy thao tác*")
+    return ConversationHandler.END
+
+# ========== SCHEDULER ==========
+class UIDChecker:
+    """Background UID checker"""
     
     def __init__(self, bot_token: str):
-        self.bot = Bot(token=bot_token)
-        self.scheduler = None
+        self.bot_token = bot_token
+        self.checker = FacebookChecker()
+        self.running = False
     
-    async def send_done_notification(self, chat_id: int, uid_data: Dict):
-        """Gửi thông báo DONE với format mới"""
-        try:
-            message = UIFormatter.format_done_message(uid_data)
+    async def start(self):
+        """Start checking loop"""
+        if self.running:
+            return
+        
+        self.running = True
+        logging.info(f"UID checker started (interval: {CHECK_INTERVAL_MINUTES} minutes)")
+        
+        # Run in background
+        asyncio.create_task(self._check_loop())
+    
+    async def stop(self):
+        """Stop checker"""
+        self.running = False
+        await self.checker.close()
+    
+    async def _check_loop(self):
+        """Main checking loop"""
+        while self.running:
+            try:
+                await self._check_all_uids()
+            except Exception as e:
+                logging.error(f"Check loop error: {e})
             
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=message,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
+            # Wait for next interval
+            await asyncio.sleep(CHECK_INTERVAL_MINUTES * 60)
+    
+    async def _check_all_uids(self):
+        """Check all active UIDs"""
+        conn = get_db()
+        c = conn.cursor()
+        
+        # Get active UIDs
+        c.execute(
+            """SELECT 
+                   f.id,
+                   f.uid,
+                   f.current_status,
+                   f.owner_id,
+                   u.telegram_id
+               FROM facebook_uids f
+               JOIN users u ON f.owner_id = u.id
+               WHERE f.is_active = 1
+               LIMIT 50"""  # Limit to 50 per batch
+        )
+        uids = c.fetchall()
+        
+        if not uids:
+            conn.close()
+            return
+        
+        logging.info(f"Checking {len(uids)} UIDs")
+        
+        for uid_data in uids:
+            try:
+                await self._check_single_uid(uid_data)
+                await asyncio.sleep(0.5)  # Rate limiting
+            except Exception as e:
+                logging.error(f"Error checking UID {uid_data['uid']}: {e}")
+        
+        conn.close()
+    
+    async def _check_single_uid(self, uid_data):
+        """Check single UID"""
+        current_status = uid_data['current_status']
+        new_status = await self.checker.check_uid(uid_data['uid'])
+        
+        if new_status != current_status:
+            # Update database
+            conn = get_db()
+            c = conn.cursor()
+            
+            now = datetime.now()
+            
+            c.execute(
+                """UPDATE facebook_uids 
+                   SET last_status = ?,
+                       current_status = ?,
+                       last_check_time = ?,
+                       check_count = check_count + 1
+                   WHERE id = ?""",
+                (current_status, new_status, now, uid_data['id'])
             )
             
-            logging.info(f"✅ Sent DONE notification for UID: {uid_data['uid']}")
+            # If DIE → LIVE, send notification
+            if current_status == 'DIE' and new_status == 'LIVE':
+                c.execute(
+                    "UPDATE facebook_uids SET done_date = ? WHERE id = ?",
+                    (now, uid_data['id'])
+                )
+                
+                # Get UID details for notification
+                c.execute(
+                    "SELECT uid, customer_name, amount FROM facebook_uids WHERE id = ?",
+                    (uid_data['id'],)
+                )
+                uid_details = c.fetchone()
+                
+                # Send notification
+                await self._send_notification(
+                    uid_data['telegram_id'],
+                    dict(uid_details)
+                )
+                
+                logging.info(f"UID {uid_data['uid']} changed: DIE → LIVE")
+            
+            conn.commit()
+            conn.close()
+    
+    async def _send_notification(self, chat_id: int, uid_data: Dict):
+        """Send DONE notification"""
+        try:
+            bot = Bot(token=self.bot_token)
+            
+            amount_str = f"{uid_data['amount']:,.0f}đ".replace(",", ".")
+            message = (
+                "🎉 *DONE KÈO FACEBOOK*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 *Khách hàng:* {uid_data['customer_name']}\n"
+                f"🆔 *UID:* `{uid_data['uid']}`\n"
+                f"💰 *Số tiền:* {amount_str}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ *Ngày done:* {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+            )
+            
+            await bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="Markdown"
+            )
             
         except Exception as e:
             logging.error(f"Failed to send notification: {e}")
-    
-    async def send_key_expiration_notifications(self):
-        """Gửi thông báo KEY sắp hết hạn"""
-        expiring_keys = KeyNotificationManager.check_expiring_keys()
-        
-        for key_data in expiring_keys['3_days']:
-            try:
-                message = UIFormatter.format_key_expiration_notification(key_data, 3)
-                await self.bot.send_message(
-                    chat_id=int(key_data['telegram_id']),
-                    text=message,
-                    parse_mode="Markdown"
-                )
-                KeyNotificationManager.mark_notification_sent(key_data['id'], '3_days')
-                logging.info(f"Sent 3-day expiration notification for key: {key_data['key_value']}")
-            except Exception as e:
-                logging.error(f"Failed to send 3-day notification: {e}")
-        
-        for key_data in expiring_keys['1_day']:
-            try:
-                message = UIFormatter.format_key_expiration_notification(key_data, 1)
-                await self.bot.send_message(
-                    chat_id=int(key_data['telegram_id']),
-                    text=message,
-                    parse_mode="Markdown"
-                )
-                KeyNotificationManager.mark_notification_sent(key_data['id'], '1_day')
-                logging.info(f"Sent 1-day expiration notification for key: {key_data['key_value']}")
-            except Exception as e:
-                logging.error(f"Failed to send 1-day notification: {e}")
 
-# ========== MAIN APPLICATION ==========
+# ========== MAIN FUNCTION - FIXED FOR RAILWAY ==========
 async def main():
-    """Main function"""
+    """Main function - FIXED for Railway"""
     # Configure logging
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -991,53 +643,59 @@ async def main():
     # Initialize database
     init_database()
     
-    # Update daily stats
-    StatsManager.update_daily_stats()
-    
-    # Create bot application
+    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Initialize handlers
-    handlers = BotHandlers(BOT_TOKEN)
+    # Add conversation handler for adding UID
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("add", add_command)],
+        states={
+            1: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_uid)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command)]
+    )
     
     # Add command handlers
-    application.add_handler(CommandHandler("start", handlers.start_command))
-    application.add_handler(CommandHandler("stats", handlers.stats_command))
-    application.add_handler(CommandHandler("report_today", handlers.daily_report_command))
-    application.add_handler(CommandHandler("mykey", handlers.mykey_command))
-    application.add_handler(CommandHandler("key_stats", handlers.admin_key_stats_command))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("list", list_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(conv_handler)
     
-    # Add callback query handler
-    application.add_handler(CallbackQueryHandler(handlers.callback_handler))
+    # Start UID checker in background
+    checker = UIDChecker(BOT_TOKEN)
+    await checker.start()
     
-    # Start scheduler
-    notifier = Notifier(BOT_TOKEN)
+    logging.info("Bot starting...")
     
-    # Schedule tasks
-    async def scheduled_tasks():
-        """Run scheduled tasks"""
-        while True:
-            try:
-                # Send key expiration notifications
-                await notifier.send_key_expiration_notifications()
-                
-                # Update daily stats (once per day)
-                if datetime.now().hour == 0:  # Midnight
-                    StatsManager.update_daily_stats()
-                
-            except Exception as e:
-                logging.error(f"Scheduled task error: {e}")
-            
-            # Wait 1 hour before next check
-            await asyncio.sleep(3600)
-    
-    # Run bot
-    logging.info("Bot is starting with premium features...")
-    
-    # Start scheduled tasks in background
-    asyncio.create_task(scheduled_tasks())
-    
+    # FIX: Use run_polling() directly without asyncio.run()
     await application.run_polling()
 
+# ========== ENTRY POINT FOR RAILWAY ==========
+def run_bot():
+    """Entry point for Railway - FIXED"""
+    try:
+        # FIX: Get existing event loop or create new one
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Run the bot
+        if loop.is_running():
+            # If loop is already running (Railway case), create task
+            loop.create_task(main())
+        else:
+            # If no loop running, run it
+            loop.run_until_complete(main())
+            
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
+    except Exception as e:
+        logging.error(f"Bot error: {e}")
+        raise
+
+# FIX: For Railway deployment
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_bot()
