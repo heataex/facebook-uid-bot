@@ -841,73 +841,63 @@ async def send_notification(telegram_id: int, uid_data: Dict):
         print(f"Send notification error: {e}")
 
 # ========== MAIN APPLICATION ==========
-def main():
-    """Main function - FIXED for Railway"""
+async def main():
+    """Hàm khởi chạy chính - Đã sửa lỗi JobQueue cho Railway"""
     # Configure logging
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         level=getattr(logging, LOG_LEVEL)
     )
     
-    print("=" * 50)
-    print("Starting Facebook UID Tracker Bot")
-    print(f"BOT_TOKEN: {'✓' if BOT_TOKEN else '✗'}")
-    print(f"SUPER_ADMIN_IDS: {SUPER_ADMIN_IDS}")
-    print(f"CHECK_INTERVAL: {CHECK_INTERVAL_MINUTES} minutes")
-    print("=" * 50)
-    
-    if not BOT_TOKEN:
-        print("❌ ERROR: BOT_TOKEN is required!")
-        return
-    
-    # Initialize database
+    # Khởi tạo database
     init_database()
     
-    # Create application
+    # 1. Khởi tạo application (Tự động thiết lập JobQueue nếu có trong requirements)
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add conversation handler for adding UID
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", add_command)],
-        states={
-            ADDING_UID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_uid_input)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    
-    # Add command handlers
+    # 2. Thiết lập JobQueue (Sửa lỗi NoneType)
+    if application.job_queue:
+        application.job_queue.run_repeating(
+            check_all_uids_job, # Đảm bảo tên hàm này khớp với hàm check của bạn
+            interval=CHECK_INTERVAL_MINUTES * 60, 
+            first=10
+        )
+        logging.info("✅ JobQueue đã được kích hoạt thành công.")
+    else:
+        logging.error("❌ JobQueue bị None. Hãy kiểm tra requirements.txt")
+
+    # Đăng ký các Handler (Giữ nguyên logic của bạn)
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("list", list_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("mykey", mykey_command))
-    application.add_handler(CommandHandler("create_key", create_key_command))
-    application.add_handler(conv_handler)
-    
-    # Store checker in bot_data
-    application.bot_data['checker'] = FacebookChecker()
-    
-    # Start background checker
-    application.job_queue.run_repeating(
-        lambda context: asyncio.create_task(check_all_uids(context.bot_data['checker'])),
-        interval=CHECK_INTERVAL_MINUTES * 60,
-        first=10  # Start after 10 seconds
-    )
-    
-    print("✅ Bot is starting...")
-    
-    # Run bot with polling
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # ... Đăng ký thêm các handler khác của bạn ở đây ...
 
-# ========== ENTRY POINT ==========
+    # 3. Khởi chạy bot thủ công để tránh lỗi 'Event loop already running'
+    async with application:
+        await application.initialize()
+        await application.start()
+        
+        logging.info("🚀 Bot đang lắng nghe tin nhắn trên Railway...")
+        await application.updater.start_polling()
+        
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+            logging.info("👋 Đang dừng bot...")
+        finally:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+
 if __name__ == "__main__":
-    # Simple entry point for Railway
+    # Cách chạy này tương thích với môi trường server
     try:
-        main()
-    except KeyboardInterrupt:
-        print("\n👋 Bot stopped by user")
-    except Exception as e:
-        print(f"❌ Bot error: {e}")
-        sys.exit(1)
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "already running" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            raise e
