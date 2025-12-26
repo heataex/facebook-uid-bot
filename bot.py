@@ -980,13 +980,22 @@ class Notifier:
                 logging.error(f"Failed to send 1-day notification: {e}")
 
 # ========== MAIN APPLICATION ==========
-async def main():
-    """Main function"""
-    # Configure logging
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=getattr(logging, LOG_LEVEL)
+def main():
+    logging.info("Bot is starting with premium features...")
+
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # add handlers ở đây
+    # application.add_handler(...)
+
+    # Scheduler mỗi 1 phút
+    application.job_queue.run_repeating(
+        scheduled_tasks,
+        interval=60,
+        first=5
     )
+
+    application.run_polling()
     
     # Initialize database
     init_database()
