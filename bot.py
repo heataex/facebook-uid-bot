@@ -891,15 +891,18 @@ async def main():
             await application.shutdown()
 
 if __name__ == "__main__":
-    # Giải quyết triệt để lỗi 'This event loop is already running'
+    # Khắc phục triệt để lỗi 'This event loop is already running' trên Railway
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Nếu loop đang chạy (trên Server), tạo task mới
+            # Nếu loop đang chạy, dùng create_task để thêm main() vào loop đó
             loop.create_task(main())
         else:
-            # Nếu loop chưa chạy, chạy cho đến khi hoàn thành
+            # Nếu loop chưa chạy, chạy đến khi hoàn thành
             loop.run_until_complete(main())
-    except RuntimeError:
-        # Nếu chưa có loop nào, khởi tạo mới hoàn toàn
-        asyncio.run(main())
+    except RuntimeError as e:
+        if "already running" in str(e):
+            # Xử lý trường hợp đặc biệt của môi trường Server
+            asyncio.ensure_future(main())
+        else:
+            asyncio.run(main())
