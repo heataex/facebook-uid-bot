@@ -10,7 +10,8 @@ import sqlite3
 import secrets
 import string
 import json
-from datetime import datetime, timedelta
+import datetime # Giữ nguyên import của bạn
+from datetime import datetime, timedelta, time # Thêm time vào đây để fix lỗi dòng 1250
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -1247,7 +1248,7 @@ class FBBot:
         # Lưu trạng thái hàng ngày lúc 00:01 mỗi ngày
         job_queue.run_daily(
             self.save_all_users_daily_status,
-            time=datetime.time(hour=0, minute=1),
+            time=time(hour=0, minute=1), # Sửa datetime.time thành time để fix lỗi unbound method
             days=(0, 1, 2, 3, 4, 5, 6)
         )
     
