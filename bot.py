@@ -1266,10 +1266,10 @@ class FBBot:
     def setup_handlers(self):
         # Luồng thêm UID
         conv_handler = ConversationHandler(
-            per_message=True,
             entry_points=[CallbackQueryHandler(self.add_uid_start, pattern="^add_uid$")],
             states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_uid_input)]},
-            fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+            fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+            per_message=False
         )
         self.application.add_handler(conv_handler)
         
