@@ -4,17 +4,32 @@ import sqlite3
 import datetime
 import pandas as pd
 import httpx
+import os
+import threading
 from io import BytesIO
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from flask import Flask
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
 
-# ==================== CẤU HÌNH (THAY TẠI ĐÂY) ====================
-TOKEN = "8388735235:AAHkD03utv9sm5ZkSs3UepDy5Ps1zDRerKU"
-ADMIN_ID = 5522878843  # ID Telegram của bạn
-DB_FILE = "fb_keo_bot_v6.db"
+# ==================== 1. WEB SERVER (HEALTH CHECK) ====================
+web_app = Flask(__name__)
 
-# ==================== DATABASE LAYER ====================
+@web_app.route("/")
+def health():
+    return "OK", 200
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    web_app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_web, daemon=True).start()
+
+# ==================== 2. CẤU HÌNH BOT & DB ====================
+TOKEN = "8388735235:AAHvdU9ClwMaCU3v4DNWVikd6VtkfpGWAUM"
+ADMIN_ID = 5522878843  # Thay ID Telegram của bạn
+DB_FILE = "fb_keo_bot_v7.db"
+
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -30,7 +45,16 @@ def db_query(q, p=(), fetch=False):
         cursor.execute(q, p)
         return cursor.fetchall() if fetch else conn.commit()
 
-# ==================== LOGIC CHECK LIVE/DIE ====================
+# ==================== 3. MENU NÚT BẤM (KEYBOARD) ====================
+def get_main_menu():
+    keyboard = [
+        [KeyboardButton("➕ Thêm Kèo"), KeyboardButton("📋 Danh Sách")],
+        [KeyboardButton("📊 Trạng Thái"), KeyboardButton("💰 Doanh Thu")],
+        [KeyboardButton("🗑 Xóa UID"), KeyboardButton("❓ Hướng Dẫn")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# ==================== 4. LOGIC CHECK FB ====================
 async def check_fb(uid):
     url = f"https://graph.facebook.com/{uid}/picture?type=normal"
     try:
@@ -39,102 +63,89 @@ async def check_fb(uid):
             return "LIVE" if r.status_code == 302 else "DIE"
     except: return "DIE"
 
-# ==================== COMMAND HANDLERS ====================
+# ==================== 5. HANDLERS (GIAO DIỆN MỚI) ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name
     msg = (
-        "🔥 *HỆ THỐNG THEO DÕI UID FACEBOOK V6.0*\n"
+        f"👋 *Chào {user_name}!*\n"
+        "Chào mừng bạn đến với hệ thống *FB Monitor V7.0*\.\n\n"
+        "🚀 Hệ thống tự động quét trạng thái UID mỗi 60 giây và thông báo ngay khi có thay đổi\.\n\n"
+        "👉 *Sử dụng các nút bên dưới để thao tác nhanh\!*"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=get_main_menu())
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "📖 *HƯỚNG DẪN CÚ PHÁP LỆNH*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "📌 *DANH SÁCH LỆNH CỦA BẠN:*\n\n"
-        "🔹 `/add_uid <uid> <tên> <tiền>` : Thêm kèo mới\n"
-        "🔹 `/list` : Xem danh sách đang theo dõi\n"
-        "🔹 `/status` : Thống kê LIVE/DIE hiện tại\n"
-        "🔹 `/remove_uid <uid>` : Xóa kèo khỏi hệ thống\n\n"
-        "💰 *THỐNG KÊ DOANH THU:*\n"
-        "🔹 `/stats_today` : Doanh thu hôm nay\n"
-        "🔹 `/stats_week` : Doanh thu 7 ngày qua\n"
-        "🔹 `/stats_month` : Doanh thu tháng này\n\n"
-        "🛠 *DÀNH CHO ADMIN:*\n"
-        "🔹 `/admin_export` : Xuất file Excel báo cáo"
+        "1️⃣ *Thêm kèo:* Gõ theo mẫu bên dưới\n"
+        "`/add_uid <UID> <Tên_Khách> <Tiền>`\n"
+        "_VD: /add_uid 1000123 An_Nguyen 500000_\n\n"
+        "2️⃣ *Xóa kèo:* Gõ lệnh\n"
+        "`/remove_uid <UID>`\n"
+        "_VD: /remove_uid 1000123_\n\n"
+        "3️⃣ *Thống kê doanh thu:* Dùng nút bấm hoặc\n"
+        "🔹 /stats\_today : Hôm nay\n"
+        "🔹 /stats\_week : 7 ngày qua\n"
+        "🔹 /stats\_month : Tháng này"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "➕ Thêm Kèo":
+        await update.message.reply_text("📌 Hãy gõ lệnh: `/add_uid <UID> <Tên_Khách> <Tiền>`\n_Ví dụ: /add_uid 1000123456 An_Nguyen 200000_", parse_mode=ParseMode.MARKDOWN)
+    elif text == "📋 Danh Sách":
+        await list_uids(update, context)
+    elif text == "📊 Trạng Thái":
+        await status_cmd(update, context)
+    elif text == "💰 Doanh Thu":
+        await stats_today(update, context)
+    elif text == "🗑 Xóa UID":
+        await update.message.reply_text("📌 Hãy gõ lệnh: `/remove_uid <UID>` để dừng theo dõi.", parse_mode=ParseMode.MARKDOWN)
+    elif text == "❓ Hướng Dẫn":
+        await show_help(update, context)
+
+# ==================== 6. OUTPUT CHỈNH CHU ====================
+
 async def add_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        if len(context.args) < 3:
-            return await update.message.reply_text("⚠️ *Sai cú pháp!*\nHD: `/add_uid 1000xx An_Nguyen 500000`", parse_mode=ParseMode.MARKDOWN)
-        
         uid, name, amount = context.args[0], context.args[1], int(context.args[2])
-        current = await check_fb(uid)
-        
+        status = await check_fb(uid)
         db_query("INSERT INTO uids (uid, customer_name, amount, status, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?)", 
-                 (uid, name, amount, current, update.effective_user.id, datetime.datetime.now()))
+                 (uid, name, amount, status, update.effective_user.id, datetime.datetime.now()))
         
-        icon = "🟢" if current == "LIVE" else "🔴"
-        await update.message.reply_text(f"✅ *THÊM KÈO THÀNH CÔNG*\n━━━━━━━━━━━━━━━━━━━━\n🆔 UID: `{uid}`\n👤 Khách: *{name}*\n💰 Tiền: *{amount:,}đ*\n📊 Trạng thái: {icon} *{current}*", parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        await update.message.reply_text(f"❌ *Lỗi:* {str(e)}")
+        icon = "🟢" if status == "LIVE" else "🔴"
+        msg = (
+            "✅ *THÊM KÈO THÀNH CÔNG*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🆔 *UID:* `{uid}`\n"
+            f"👤 *Khách:* {name}\n"
+            f"💰 *Tiền:* {amount:,}đ\n"
+            f"📊 *Trạng thái:* {icon} {status}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 _Hệ thống đã bắt đầu theo dõi\.\.\._"
+        )
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    except:
+        await update.message.reply_text("⚠️ *Sai cú pháp\!* Thử lại: `/add_uid 123 An 500000`", parse_mode=ParseMode.MARKDOWN)
 
 async def list_uids(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = db_query("SELECT * FROM uids WHERE added_by = ? AND is_active = 1", (update.effective_user.id,), fetch=True)
-    if not rows: return await update.message.reply_text("📝 *Danh sách theo dõi trống!*", parse_mode=ParseMode.MARKDOWN)
+    if not rows:
+        return await update.message.reply_text("📋 *Danh sách đang trống\!*", parse_mode=ParseMode.MARKDOWN)
     
-    msg = "📋 *DANH SÁCH UID ĐANG THEO DÕI*\n━━━━━━━━━━━━━━━━━━━━\n"
+    msg = "📋 *DANH SÁCH THEO DÕI*\n━━━━━━━━━━━━━━━━━━━━\n"
     total = 0
     for r in rows:
         icon = "🟢" if r['status'] == "LIVE" else "🔴"
-        msg += f"{icon} `{r['uid']}` | {r['customer_name']} | {r['amount']:,}đ\n"
+        msg += f"{icon} `{r['uid']}` \| {r['customer_name']} \| *{r['amount']:,}đ*\n"
         total += r['amount']
-    msg += f"━━━━━━━━━━━━━━━━━━━━\n💰 *Tổng tiền kèo:* `{total:,}đ`"
+    msg += f"━━━━━━━━━━━━━━━━━━━━\n💰 *Tổng tiền kèo:* `{total:,} VNĐ`"
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = db_query("SELECT status, COUNT(*) as c FROM uids WHERE added_by = ? AND is_active = 1 GROUP BY status", (update.effective_user.id,), fetch=True)
-    if not res: return await update.message.reply_text("📊 *Hiện tại chưa theo dõi UID nào.*", parse_mode=ParseMode.MARKDOWN)
-    
-    msg = "📊 *THỐNG KÊ TRẠNG THÁI HIỆN TẠI*\n━━━━━━━━━━━━━━━━━━━━\n"
-    for r in res:
-        icon = "🟢" if r['status'] == "LIVE" else "🔴"
-        msg += f"{icon} {r['status']}: *{r['c']} UID*\n"
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-async def remove_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return await update.message.reply_text("⚠️ HD: `/remove_uid <uid>`", parse_mode=ParseMode.MARKDOWN)
-    uid_rm = context.args[0]
-    db_query("UPDATE uids SET is_active = 0 WHERE uid = ? AND added_by = ?", (uid_rm, update.effective_user.id))
-    await update.message.reply_text(f"🗑 *Đã ngừng theo dõi UID:* `{uid_rm}`", parse_mode=ParseMode.MARKDOWN)
-
-# ==================== STATS DOANH THU ====================
-
-async def stats_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = db_query("SELECT COUNT(*) as c, SUM(amount) as s FROM uids WHERE added_by = ? AND status = 'LIVE' AND date(done_at) = date('now')", (update.effective_user.id,), fetch=True)
-    count = res[0]['c']
-    total = res[0]['s'] or 0
-    await update.message.reply_text(f"💰 *DOANH THU HÔM NAY*\n━━━━━━━━━━━━━━━━━━━━\n✅ Kèo DONE: *{count}*\n💸 Tổng thu: `{total:,}đ`", parse_mode="Markdown")
-
-async def stats_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = db_query("SELECT COUNT(*) as c, SUM(amount) as s FROM uids WHERE added_by = ? AND status = 'LIVE' AND done_at >= date('now', '-7 days')", (update.effective_user.id,), fetch=True)
-    count = res[0]['c']
-    total = res[0]['s'] or 0
-    await update.message.reply_text(f"📅 *DOANH THU 7 NGÀY QUA*\n━━━━━━━━━━━━━━━━━━━━\n✅ Kèo DONE: *{count}*\n💸 Tổng thu: `{total:,}đ`", parse_mode="Markdown")
-
-async def stats_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = db_query("SELECT COUNT(*) as c, SUM(amount) as s FROM uids WHERE added_by = ? AND status = 'LIVE' AND strftime('%m', done_at) = strftime('%m', 'now')", (update.effective_user.id,), fetch=True)
-    count = res[0]['c']
-    total = res[0]['s'] or 0
-    await update.message.reply_text(f"📊 *DOANH THU THÁNG NÀY*\n━━━━━━━━━━━━━━━━━━━━\n✅ Kèo DONE: *{count}*\n💸 Tổng thu: `{total:,}đ`", parse_mode="Markdown")
-
-async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    data = db_query("SELECT * FROM uids", fetch=True)
-    df = pd.DataFrame([dict(r) for r in data])
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Data_Keo')
-    output.seek(0)
-    await update.message.reply_document(document=output, filename=f"Bao_Cao_FB_Keo_{datetime.date.today()}.xlsx", caption="📊 *Báo cáo tổng hợp hệ thống*")
-
-# ==================== AUTO MONITOR JOB ====================
+# ==================== 7. AUTO MONITOR & MAIN ====================
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     rows = db_query("SELECT * FROM uids WHERE is_active = 1", fetch=True)
@@ -143,37 +154,35 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
         if new_status != row['status']:
             done_at = datetime.datetime.now() if new_status == "LIVE" else None
             db_query("UPDATE uids SET status = ?, done_at = ? WHERE id = ?", (new_status, done_at, row['id']))
-            
             icon = "🟢 LIVE" if new_status == "LIVE" else "🔴 DIE"
-            msg = (f"🔔 *CẬP NHẬT TRẠNG THÁI MỚI*\n━━━━━━━━━━━━━━━━━━━━\n"
-                   f"🆔 UID: `{row['uid']}`\n"
-                   f"👤 Khách: *{row['customer_name']}*\n"
-                   f"🔄 Trạng thái: {row['status']} ➔ *{icon}*\n"
-                   f"💰 Tiền kèo: *{row['amount']:,}đ*")
+            msg = (
+                "🔔 *CẬP NHẬT TRẠNG THÁI*\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"🆔 UID: `{row['uid']}`\n"
+                f"👤 Khách: {row['customer_name']}\n"
+                f"🔄 Trạng thái: {row['status']} ➔ *{icon}*\n"
+                f"💰 Tiền kèo: *{row['amount']:,}đ*"
+            )
             try: await context.bot.send_message(chat_id=row['added_by'], text=msg, parse_mode=ParseMode.MARKDOWN)
             except: pass
-
-# ==================== KHỞI CHẠY BOT ====================
 
 def main():
     init_db()
     app = Application.builder().token(TOKEN).build()
     
-    # Register Commands - Tách bạch rõ ràng
+    # Đăng ký Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add_uid", add_uid))
-    app.add_handler(CommandHandler("list", list_uids))
-    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("remove_uid", remove_uid))
-    app.add_handler(CommandHandler("stats_today", stats_today))
-    app.add_handler(CommandHandler("stats_week", stats_week))
-    app.add_handler(CommandHandler("stats_month", stats_month))
-    app.add_handler(CommandHandler("admin_export", admin_export))
+    app.add_handler(CommandHandler("help", show_help))
     
-    # Chạy quét tự động mỗi 60s
+    # Đăng ký Message Handler để nhận diện nút bấm Menu
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Quét mỗi 60s
     app.job_queue.run_repeating(monitor_job, interval=60, first=10)
     
-    print("--- BOT STARTED V6.0 ---")
+    print("--- BOT STARTED V7.0 ---")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
