@@ -918,13 +918,34 @@ class FBBot:
         return 1  # Trạng thái ADDING_UID
 
     async def show_uid_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        conn = Database.get_conn()
-        uids = conn.execute("SELECT uid, status FROM uids WHERE user_id = (SELECT id FROM users WHERE telegram_id=?)", (user_id,)).fetchall()
-        conn.close()
-        msg = "📋 *DANH SÁCH UID:*\n" + "\n".join([f"- `{r[0]}`: {r[1]}" for r in uids]) if uids else "📭 Trống"
-        await update.callback_query.message.edit_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=Keyboards.main_menu())
+        try:
+            user_id = update.effective_user.id
+            conn = Database.get_conn()
+            # Thêm row_factory để lấy dữ liệu theo tên cột
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT uid, status FROM uids WHERE user_id = (SELECT id FROM users WHERE telegram_id=?) LIMIT 10", (user_id,))
+            rows = cursor.fetchall()
+            conn.close()
 
+            if not rows:
+                msg = "📭 *Danh sách UID của bạn hiện đang trống.*"
+            else:
+                msg = "📋 *DANH SÁCH UID:*\n" + "\n".join([f"- `{r['uid']}`: {r['status']}" for r in rows])
+            
+            # Thêm thời gian cập nhật để tránh lỗi "Message is not modified"
+            msg += f"\n\n🕒 _Cập nhật lúc: {datetime.now().strftime('%H:%M:%S')}_"
+
+            await update.callback_query.message.edit_text(
+                msg, 
+                parse_mode=ParseMode.MARKDOWN, 
+                reply_markup=Keyboards.main_menu()
+            )
+        except Exception as e:
+            # Lờ lỗi nếu nội dung không đổi hoặc in ra log nếu là lỗi khác
+            if "Message is not modified" not in str(e):
+                print(f"Lỗi hiển thị danh sách: {e}")
 
     async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Hiển thị trạng thái qua callback"""
