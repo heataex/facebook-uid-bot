@@ -32,7 +32,8 @@ from telegram.ext import (
     MessageHandler, 
     CallbackQueryHandler,
     ContextTypes, 
-    filters
+    filters,
+    ConversationHandler
 )
 from telegram.constants import ParseMode
 
@@ -1235,6 +1236,10 @@ class FBBot:
                     f"Được tạo thủ công bởi ADMIN",
             parse_mode=ParseMode.MARKDOWN
         )
+        
+    async def handle_uid_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("✅ Đã nhận dữ liệu UID!")
+         return -1 # Kết thúc ConversationHandler
     
     # ==================== SETUP ====================
     def setup_handlers(self):
