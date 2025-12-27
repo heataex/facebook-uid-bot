@@ -10,8 +10,8 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, 
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # --- CONFIG ---
-TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_ID = 123456789 # Thay bằng ID thật của bạn
+TOKEN = "8388735235:AAEdJPWlZxo9Vm5rVIYGsFIeJ44wWTuT3D0"
+ADMIN_ID = 5522878843 # Thay bằng ID thật của bạn
 DB_URL = "sqlite:///fb_monitor.db"
 
 Base = declarative_base()
