@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 
 # ==================== CẤU HÌNH ====================
-TOKEN = "8388735235:AAFw4kiurkE6AtrwAHxC4aG0uaJdAEyRHus"
+TOKEN = "8388735235:AAHrxFJt2o5i2o63p8f9DcfJg8xdbdycnzU"
 ADMIN_ID = 5522878843  # <--- PHẢI THAY ID CỦA BẠN VÀO ĐÂY
 DB_FILE = "fb_keo_bot_v5.db"
 
@@ -98,6 +98,46 @@ async def stats_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     res = db_query("SELECT COUNT(*) as c, SUM(amount) as s FROM uids WHERE added_by = ? AND status = 'LIVE' AND date(done_at) = date('now')", (user_id,), fetch=True)
     await update.message.reply_text(f"💰 **Hôm nay:**\n✅ DONE: {res[0]['c']} kèo\nTổng: {res[0]['s'] or 0:,}đ")
+
+async def list_uids(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    # Lấy tất cả UID đang active
+    rows = db_query("SELECT * FROM uids WHERE added_by = ? AND is_active = 1 ORDER BY status DESC", (user_id,), fetch=True)
+    
+    if not rows:
+        return await update.message.reply_text("❌ Bạn hiện không có kèo nào trong danh sách theo dõi.")
+    
+    msg = "📝 **DANH SÁCH KÈO ĐANG THEO DÕI**\n\n"
+    total_amount = 0
+    
+    for row in rows:
+        status_icon = "🟢" if row['status'] == "LIVE" else "🔴"
+        msg += f"{status_icon} `{row['uid']}` | {row['customer_name']} | {row['amount']:,}đ\n"
+        total_amount += row['amount']
+    
+    msg += f"\n──────────────\n💰 **Tổng tiền kèo:** {total_amount:,} VNĐ"
+    msg += "\n\n💡 *Dùng `/remove_uid <uid>` để xóa kèo khỏi danh sách.*"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def list_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    # Chỉ lấy những kèo đã LIVE
+    rows = db_query("SELECT * FROM uids WHERE added_by = ? AND is_active = 1 AND status = 'LIVE'", (user_id,), fetch=True)
+    
+    if not rows:
+        return await update.message.reply_text("Chưa có kèo nào DONE (LIVE).")
+    
+    msg = "✅ **CÁC KÈO ĐÃ HOÀN THÀNH (LIVE)**\n\n"
+    total_done = 0
+    for row in rows:
+        msg += f"✔ `{row['uid']}` | {row['customer_name']} | {row['amount']:,}đ\n"
+        total_done += row['amount']
+    
+    msg += f"\n──────────────\n💵 **Tổng thu nhập:** {total_done:,} VNĐ"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 
 # ==================== MAIN RUNNER ====================
 def main():
