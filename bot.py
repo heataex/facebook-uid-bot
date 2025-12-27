@@ -10,7 +10,7 @@ import sqlite3
 import secrets
 import string
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -892,17 +892,25 @@ class FBBot:
         data = query.data
         
         if data == "status":
-            await self.show_status(update, context)
+        await self.show_status(update, context)
         elif data == "stats_menu":
-            await self.show_stats_menu(update, context)
+        await self.show_stats_menu(update, context)
         elif data == "stats_today":
-            await self.show_stats_today(update, context)
+        await self.show_stats_today(update, context)
         elif data == "stats_week":
-            await self.show_stats_week(update, context)
+        await self.show_stats_week(update, context)
         elif data == "stats_month":
-            await self.show_stats_month(update, context)
+        await self.show_stats_month(update, context)
         elif data == "back_main":
-            await self.show_main_menu(update, context)
+        await self.show_main_menu(update, context)
+        elif data == "add_uid":
+            # Gọi hàm bắt đầu ConversationHandler thêm UID
+        await self.add_uid_start(update, context)
+        elif data == "list_uids":
+            # Gọi hàm hiển thị danh sách UID
+        await self.show_uid_list(update, context)
+
+
     
     async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Hiển thị trạng thái qua callback"""
@@ -1247,7 +1255,7 @@ class FBBot:
         # Lưu trạng thái hàng ngày lúc 00:01 mỗi ngày
         job_queue.run_daily(
             self.save_all_users_daily_status,
-            time=datetime.time(hour=0, minute=1),
+            time=time(hour=0, minute=1),
             days=(0, 1, 2, 3, 4, 5, 6)
         )
     
@@ -1309,14 +1317,14 @@ class FBBot:
 
 # ==================== MAIN ====================
 if __name__ == "__main__":
-    logging.basicConfig(
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=logging.INFO
-    )
-    
     bot = FBBot()
-    
     try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Nếu đang chạy trên Server Railway
+            loop.create_task(bot.run())
+        else:
+            # Nếu chạy trên máy tính cá nhân
+            loop.run_until_complete(bot.run())
+    except RuntimeError:
         asyncio.run(bot.run())
-    except KeyboardInterrupt:
-        print("\n👋 Bot đã dừng")
