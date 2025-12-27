@@ -1,5 +1,6 @@
-python-telegram-bot[job-queue]>=20.0
-sqlalchemy
+python-telegram-bot[job-queue]
+SQLAlchemy
 pandas
 openpyxl
 httpx
+flask
