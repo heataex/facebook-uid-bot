@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 # 1. CẤU HÌNH HỆ THỐNG
 # ==========================================
 TOKEN = "8388735235:AAEq-u7EuXROgfdBfucJYaQlAg9LlOfSO0k"
-ADMIN_ID = 123456789  # <--- THAY ID CỦA BẠN VÀO ĐÂY (Vào @userinfobot để lấy)
+ADMIN_ID = 5522878843  # <--- THAY ID CỦA BẠN VÀO ĐÂY (Vào @userinfobot để lấy)
 DB_URL = "sqlite:///fb_monitor_pro.db"
 
 # ==========================================
