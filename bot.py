@@ -1,843 +1,1322 @@
+#!/usr/bin/env python3
 """
-Facebook UID Tracker Bot - Fixed Version for Railway
-Stable, no event loop errors, optimized for production
+FB KÈO BOT - Telegram Bot theo dõi trạng thái UID Facebook
+Version 4.0 - Update tracking dài hạn & báo cáo nâng cao
 """
 
-import os
-import logging
 import asyncio
+import logging
 import sqlite3
-import httpx
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+import secrets
+import string
 import json
-import sys
+from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass
+from enum import Enum
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from io import BytesIO
 
-from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ConversationHandler,
-    filters,
-    ContextTypes
+from telegram import (
+    Update, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton,
+    ReplyKeyboardRemove,
+    InputFile
 )
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    MessageHandler, 
+    CallbackQueryHandler,
+    ContextTypes, 
+    filters
+)
+from telegram.constants import ParseMode
 
-# ========== CONFIGURATION ==========
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-SUPER_ADMIN_IDS = [int(x.strip()) for x in os.getenv("SUPER_ADMIN_IDS", "").split(",") if x.strip()]
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "2"))
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+# ==================== CẤU HÌNH ====================
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+CHECK_INTERVAL = 60  # Giây
+DB_FILE = "fb_keo_bot.db"
+DEFAULT_UID_LIMIT = 10
+DEFAULT_EXPIRE_DAYS = 30
+ADMIN_ID = 123456789  # Thay bằng ID ADMIN thực tế
 
-# ========== DATABASE ==========
-DB_FILE = "/tmp/bot_data.db"
-
+# ==================== DATABASE UPDATE ====================
 def init_database():
-    """Initialize database"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        
-        # Users table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_id TEXT UNIQUE NOT NULL,
-                username TEXT,
-                first_name TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Keys table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS access_keys (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                key_value TEXT UNIQUE NOT NULL,
-                owner_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expired_at TIMESTAMP NOT NULL,
-                status TEXT DEFAULT 'ACTIVE',
-                notes TEXT,
-                FOREIGN KEY (owner_id) REFERENCES users (id)
-            )
-        ''')
-        
-        # UIDs table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS facebook_uids (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                uid TEXT NOT NULL,
-                customer_name TEXT NOT NULL,
-                amount REAL NOT NULL,
-                current_status TEXT DEFAULT 'DIE',
-                last_status TEXT,
-                receive_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                done_date TIMESTAMP,
-                last_check_time TIMESTAMP,
-                owner_id INTEGER,
-                key_id INTEGER,
-                is_active BOOLEAN DEFAULT 1,
-                check_count INTEGER DEFAULT 0,
-                notes TEXT,
-                FOREIGN KEY (owner_id) REFERENCES users (id),
-                FOREIGN KEY (key_id) REFERENCES access_keys (id)
-            )
-        ''')
-        
-        # Create indexes
-        c.execute('CREATE INDEX IF NOT EXISTS idx_uids_key ON facebook_uids(key_id)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_uids_owner ON facebook_uids(owner_id)')
-        c.execute('CREATE INDEX IF NOT EXISTS idx_keys_status ON access_keys(status)')
-        
-        conn.commit()
-        conn.close()
-        
-        print(f"Database initialized at {DB_FILE}")
-        
-    except Exception as e:
-        print(f"Database init error: {e}")
-
-def get_db():
-    """Get database connection"""
+    """Khởi tạo database SQLite với các bảng mới"""
     conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-# ========== FACEBOOK CHECKER ==========
-class FacebookChecker:
-    def __init__(self):
-        self.client = httpx.AsyncClient(
-            timeout=10,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+    cursor = conn.cursor()
+    
+    # Bảng users (có sẵn)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE,
+            username TEXT,
+            role TEXT DEFAULT 'USER',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    ''')
     
-    async def check_uid(self, uid: str) -> str:
-        """Check if UID is LIVE or DIE"""
-        try:
-            # Method 1: Try profile page
-            url = f"https://www.facebook.com/{uid}"
-            response = await self.client.get(url, follow_redirects=False)
-            
-            if response.status_code in [200, 302]:
-                # Check if page is available
-                text = response.text.lower()
-                if "page isn't available" in text or "content not found" in text:
-                    return "DIE"
-                return "LIVE"
-            elif response.status_code == 404:
-                return "DIE"
-            else:
-                # Try alternative method
-                return await self._check_alternative(uid)
-                
-        except Exception as e:
-            print(f"Check error for {uid}: {e}")
-            return "DIE"
+    # Bảng api_keys
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT UNIQUE,
+            user_id INTEGER,
+            uid_limit INTEGER DEFAULT 10,
+            expired_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'ACTIVE',
+            note TEXT,
+            assigned_to INTEGER,
+            FOREIGN KEY (user_id) REFERENCES users (id),
+            FOREIGN KEY (assigned_to) REFERENCES users (id)
+        )
+    ''')
     
-    async def _check_alternative(self, uid: str) -> str:
-        """Alternative check method"""
-        try:
-            url = f"https://graph.facebook.com/{uid}/picture?type=large&redirect=false"
-            response = await self.client.get(url)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("data") and data["data"].get("url"):
-                    return "LIVE"
-                else:
-                    return "DIE"
-            else:
-                return "DIE"
-        except:
-            return "DIE"
+    # Bảng uids - THÊM TRƯỜNG MỚI: long_tracking
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT,
+            user_id INTEGER,
+            key_id INTEGER,
+            status TEXT DEFAULT 'DIE',
+            tracking_status TEXT DEFAULT 'ACTIVE',
+            customer_name TEXT,
+            amount INTEGER DEFAULT 1000000,
+            note TEXT,
+            received_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            first_live_date TIMESTAMP,
+            done_date TIMESTAMP,
+            last_checked TIMESTAMP,
+            removed_at TIMESTAMP,
+            long_tracking BOOLEAN DEFAULT 1,  -- MỚI: Theo dõi dài hạn
+            FOREIGN KEY (user_id) REFERENCES users (id),
+            FOREIGN KEY (key_id) REFERENCES api_keys (id)
+        )
+    ''')
     
-    async def close(self):
-        """Close HTTP client"""
-        await self.client.aclose()
+    # Bảng transactions
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid_id INTEGER,
+            user_id INTEGER,
+            amount INTEGER,
+            transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            period TEXT,  -- daily, weekly, monthly
+            FOREIGN KEY (uid_id) REFERENCES uids (id),
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    
+    # Bảng key_logs
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS key_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_id INTEGER,
+            admin_id INTEGER,
+            action TEXT,
+            details TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (key_id) REFERENCES api_keys (id),
+            FOREIGN KEY (admin_id) REFERENCES users (id)
+        )
+    ''')
+    
+    # ==================== BẢNG MỚI ====================
+    # Bảng uid_logs - Ghi log thay đổi trạng thái UID
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS uid_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid_id INTEGER,
+            old_status TEXT,
+            new_status TEXT,
+            checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            details TEXT,
+            FOREIGN KEY (uid_id) REFERENCES uids (id)
+        )
+    ''')
+    
+    # Bảng status_history - Lịch sử trạng thái hàng ngày
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            total_uids INTEGER,
+            live_uids INTEGER,
+            die_uids INTEGER,
+            paused_uids INTEGER,
+            record_date DATE DEFAULT CURRENT_DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    
+    # Bảng revenue_logs - Log doanh thu
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS revenue_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            amount INTEGER,
+            period TEXT,  -- daily, weekly, monthly
+            record_date DATE DEFAULT CURRENT_DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    
+    # Index cho performance
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_uid_logs_uid ON uid_logs(uid_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_status_history_date ON status_history(record_date)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_revenue_period ON revenue_logs(period, record_date)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_uids_long_tracking ON uids(long_tracking)')
+    
+    conn.commit()
+    conn.close()
 
-# ========== KEY MANAGEMENT ==========
-class KeyManager:
+# ==================== MODELS UPDATE ====================
+@dataclass
+class User:
+    id: int
+    telegram_id: int
+    username: str
+    role: str
+    
+@dataclass
+class APIKey:
+    id: int
+    key: str
+    user_id: int
+    uid_limit: int
+    expired_at: datetime
+    status: str
+    note: str
+    assigned_to: Optional[int]
+    
+@dataclass
+class UID:
+    id: int
+    uid: str
+    user_id: int
+    key_id: int
+    status: str
+    tracking_status: str
+    customer_name: str
+    amount: int
+    note: str
+    received_date: datetime
+    first_live_date: Optional[datetime]
+    done_date: Optional[datetime]
+    last_checked: datetime
+    removed_at: Optional[datetime]
+    long_tracking: bool
+
+# ==================== DATABASE HELPER UPDATE ====================
+class Database:
     @staticmethod
-    def generate_key():
-        """Generate random key"""
-        import secrets
-        import string
-        alphabet = string.ascii_uppercase + string.digits
-        return f"FB-{''.join(secrets.choice(alphabet) for _ in range(10))}"
+    def get_conn():
+        return sqlite3.connect(DB_FILE, detect_types=sqlite3.PARSE_DECLTYPES)
     
     @staticmethod
-    def create_key(telegram_id: str, days: int = 30, notes: str = None):
-        """Create new key"""
-        conn = get_db()
-        c = conn.cursor()
+    def dict_factory(cursor, row):
+        d = {}
+        for idx, col in enumerate(cursor.description):
+            d[col[0]] = row[idx]
+        return d
+    
+    # ==================== USER ====================
+    @staticmethod
+    def get_user(telegram_id: int) -> Optional[User]:
+        conn = Database.get_conn()
+        conn.row_factory = Database.dict_factory
+        cursor = conn.cursor()
         
-        try:
-            # Get or create user
-            c.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
-            user = c.fetchone()
-            
-            if not user:
-                c.execute(
-                    "INSERT INTO users (telegram_id) VALUES (?)",
-                    (telegram_id,)
-                )
-                user_id = c.lastrowid
-            else:
-                user_id = user['id']
-            
-            # Generate unique key
-            key_value = KeyManager.generate_key()
-            while True:
-                c.execute("SELECT id FROM access_keys WHERE key_value = ?", (key_value,))
-                if not c.fetchone():
-                    break
-                key_value = KeyManager.generate_key()
-            
-            # Create key
-            expired_at = datetime.now() + timedelta(days=days)
-            c.execute(
-                """INSERT INTO access_keys 
-                   (key_value, owner_id, expired_at, notes) 
-                   VALUES (?, ?, ?, ?)""",
-                (key_value, user_id, expired_at, notes)
-            )
-            
-            conn.commit()
-            return key_value
-            
-        except Exception as e:
-            print(f"Create key error: {e}")
-            return None
-        finally:
-            conn.close()
+        cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return User(**row)
+        return None
     
     @staticmethod
-    def validate_key(key_value: str, telegram_id: str) -> Tuple[bool, str]:
-        """Validate user's key"""
-        conn = get_db()
-        c = conn.cursor()
-        
-        try:
-            c.execute(
-                """SELECT k.*, u.telegram_id 
-                   FROM access_keys k 
-                   JOIN users u ON k.owner_id = u.id
-                   WHERE k.key_value = ?""",
-                (key_value,)
-            )
-            key_data = c.fetchone()
-            
-            if not key_data:
-                return False, "Key không tồn tại"
-            
-            # Check owner
-            if str(key_data['telegram_id']) != str(telegram_id):
-                return False, "Key không thuộc về bạn"
-            
-            # Check status
-            if key_data['status'] != 'ACTIVE':
-                return False, f"Key đang ở trạng thái {key_data['status']}"
-            
-            # Check expiration
-            expired_at = datetime.fromisoformat(key_data['expired_at'])
-            if expired_at < datetime.now():
-                return False, "Key đã hết hạn"
-            
-            return True, "Key hợp lệ"
-            
-        except Exception as e:
-            print(f"Validate key error: {e}")
-            return False, "Lỗi hệ thống"
-        finally:
-            conn.close()
-
-# ========== BOT HANDLERS ==========
-ADDING_UID = 1
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
-    user = update.effective_user
+    def is_admin(telegram_id: int) -> bool:
+        user = Database.get_user(telegram_id)
+        return user and user.role == "ADMIN" if user else False
     
-    # Save user to database
-    conn = get_db()
-    c = conn.cursor()
-    try:
-        c.execute(
-            """INSERT OR IGNORE INTO users (telegram_id, username, first_name) 
-               VALUES (?, ?, ?)""",
-            (str(user.id), user.username, user.first_name)
-        )
-        conn.commit()
-    except Exception as e:
-        print(f"Save user error: {e}")
-    finally:
-        conn.close()
-    
-    welcome = (
-        "🤖 *Facebook UID Tracker Bot*\n\n"
-        "🔹 *Tính năng:*\n"
-        "• Theo dõi UID LIVE/DIE tự động\n"
-        "• Thông báo khi DIE → LIVE\n"
-        "• Quản lý bằng KEY\n\n"
-        "📋 *Lệnh có sẵn:*\n"
-        "/add - Thêm UID mới\n"
-        "/list - Xem danh sách UID\n"
-        "/stats - Thống kê\n"
-        "/mykey - Thông tin KEY\n"
-        "/help - Hướng dẫn\n\n"
-        f"🔄 Auto-check: {CHECK_INTERVAL_MINUTES} phút"
-    )
-    
-    await update.message.reply_text(welcome, parse_mode="Markdown")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /help command"""
-    help_text = (
-        "🆘 *HƯỚNG DẪN SỬ DỤNG*\n\n"
-        "1. *Kích hoạt KEY:*\n"
-        "   Liên hệ admin để được cấp KEY\n\n"
-        "2. *Thêm UID:*\n"
-        "   Gõ: /add\n"
-        "   Format: `UID | Tên KH | Số tiền | Trạng thái`\n"
-        "   Ví dụ: `1000123456789 | Nguyễn Văn A | 500000 | DIE`\n\n"
-        "3. *Theo dõi:*\n"
-        "   • Bot tự động check mỗi {CHECK_INTERVAL_MINUTES} phút\n"
-        "   • Thông báo khi DIE → LIVE\n"
-        "   • /list - Xem danh sách UID\n\n"
-        "4. *Thống kê:*\n"
-        "   • /stats - Xem thống kê\n"
-        "   • /mykey - Thông tin KEY\n\n"
-        "📞 *Hỗ trợ:* Liên hệ admin nếu cần giúp đỡ"
-    )
-    
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /add command"""
-    # Check if user has valid key
-    user_id = str(update.effective_user.id)
-    
-    conn = get_db()
-    c = conn.cursor()
-    try:
-        c.execute(
-            """SELECT k.key_value 
-               FROM access_keys k
-               JOIN users u ON k.owner_id = u.id
-               WHERE u.telegram_id = ?
-               AND k.status = 'ACTIVE'
-               AND k.expired_at > datetime('now')
-               LIMIT 1""",
-            (user_id,)
-        )
-        key = c.fetchone()
+    # ==================== STATUS HIỆN TẠI ====================
+    @staticmethod
+    def get_current_status(user_id: int = None, is_admin: bool = False) -> Dict:
+        """Lấy trạng thái HIỆN TẠI (không tính DONE)"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
         
-        if not key and int(user_id) not in SUPER_ADMIN_IDS:
-            await update.message.reply_text(
-                "❌ *Bạn cần có KEY hợp lệ để thêm UID!*\n"
-                "Liên hệ admin để được cấp KEY.",
-                parse_mode="Markdown"
-            )
-            return ConversationHandler.END
-            
-    except Exception as e:
-        print(f"Check key error: {e}")
-    finally:
-        conn.close()
-    
-    instructions = (
-        "📝 *THÊM UID MỚI*\n\n"
-        "Nhập theo định dạng:\n\n"
-        "`UID | Tên khách hàng | Số tiền | Trạng thái`\n\n"
-        "*Ví dụ:*\n"
-        "`1000123456789 | Nguyễn Văn A | 500000 | DIE`\n\n"
-        "*Lưu ý:*\n"
-        "• Trạng thái: LIVE hoặc DIE\n"
-        "• Số tiền: VNĐ (không dấu phẩy)\n\n"
-        "Gõ /cancel để hủy."
-    )
-    
-    await update.message.reply_text(instructions, parse_mode="Markdown")
-    return ADDING_UID
-
-async def handle_uid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle UID input"""
-    try:
-        text = update.message.text.strip()
-        parts = [p.strip() for p in text.split("|")]
-        
-        if len(parts) != 4:
-            await update.message.reply_text("❌ *Sai định dạng!* Cần 4 phần (UID | Tên | Số tiền | Trạng thái)")
-            return ADDING_UID
-        
-        uid, customer_name, amount_str, status = parts
-        
-        # Validate
-        if status.upper() not in ["LIVE", "DIE"]:
-            await update.message.reply_text("❌ *Trạng thái* phải là LIVE hoặc DIE")
-            return ADDING_UID
-        
-        try:
-            amount = float(amount_str.replace(",", ""))
-            if amount <= 0:
-                raise ValueError
-        except:
-            await update.message.reply_text("❌ *Số tiền* không hợp lệ")
-            return ADDING_UID
-        
-        # Get user info
-        user = update.effective_user
-        conn = get_db()
-        c = conn.cursor()
-        
-        try:
-            # Get user ID
-            c.execute("SELECT id FROM users WHERE telegram_id = ?", (str(user.id),))
-            user_data = c.fetchone()
-            
-            if not user_data:
-                c.execute(
-                    "INSERT INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)",
-                    (str(user.id), user.username, user.first_name)
-                )
-                user_id = c.lastrowid
-            else:
-                user_id = user_data['id']
-            
-            # Get active key for user
-            c.execute(
-                """SELECT k.id FROM access_keys k 
-                   WHERE k.owner_id = ? 
-                   AND k.status = 'ACTIVE'
-                   AND k.expired_at > datetime('now')
-                   LIMIT 1""",
-                (user_id,)
-            )
-            key_data = c.fetchone()
-            
-            if not key_data and int(user.id) not in SUPER_ADMIN_IDS:
-                await update.message.reply_text(
-                    "❌ *Bạn chưa có KEY hợp lệ!*\nLiên hệ admin để được cấp KEY.",
-                    parse_mode="Markdown"
-                )
-                return ConversationHandler.END
-            
-            key_id = key_data['id'] if key_data else 0
-            
-            # Add UID
-            c.execute(
-                """INSERT INTO facebook_uids 
-                   (uid, customer_name, amount, current_status, owner_id, key_id) 
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (uid, customer_name, amount, status.upper(), user_id, key_id)
-            )
-            
-            conn.commit()
-            
-            success_msg = (
-                "✅ *ĐÃ THÊM THÀNH CÔNG!*\n\n"
-                f"🆔 *UID:* `{uid}`\n"
-                f"👤 *Khách hàng:* {customer_name}\n"
-                f"💰 *Số tiền:* {amount:,.0f}đ\n"
-                f"📊 *Trạng thái:* {status}\n"
-                f"📅 *Ngày nhận:* {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-            )
-            
-            await update.message.reply_text(success_msg, parse_mode="Markdown")
-            
-        except sqlite3.IntegrityError:
-            await update.message.reply_text(f"❌ *UID {uid}* đã tồn tại trong hệ thống của bạn!")
-        except Exception as e:
-            print(f"Add UID error: {e}")
-            await update.message.reply_text("❌ *Có lỗi xảy ra!* Vui lòng thử lại.")
-        
-        finally:
-            conn.close()
-        
-        return ConversationHandler.END
-        
-    except Exception as e:
-        print(f"UID input error: {e}")
-        await update.message.reply_text("❌ *Có lỗi xảy ra!* Vui lòng thử lại.")
-        return ConversationHandler.END
-
-async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /list command"""
-    user = update.effective_user
-    
-    conn = get_db()
-    c = conn.cursor()
-    
-    try:
-        # Get user's UIDs
-        c.execute(
-            """SELECT 
-                    uid,
-                    customer_name,
-                    amount,
-                    current_status,
-                    last_check_time
-                FROM facebook_uids 
-                WHERE owner_id = (SELECT id FROM users WHERE telegram_id = ?)
-                AND is_active = 1
-                ORDER BY created_at DESC
-                LIMIT 20""",
-            (str(user.id),)
-        )
-        uids = c.fetchall()
-        
-        if not uids:
-            await update.message.reply_text("📭 *Bạn chưa có UID nào!*")
-            return
-        
-        # Format message
-        message = "📋 *DANH SÁCH UID*\n━━━━━━━━━━━━━━━━━━━━\n"
-        
-        for uid in uids:
-            status_emoji = "🟢" if uid['current_status'] == 'LIVE' else "🔴"
-            amount_str = f"{uid['amount']:,.0f}đ".replace(",", ".")
-            
-            message += f"{status_emoji} `{uid['uid']}` - {amount_str}\n"
-            
-            if uid['customer_name']:
-                name = uid['customer_name'][:20] + "..." if len(uid['customer_name']) > 20 else uid['customer_name']
-                message += f"   👤 {name}\n"
-            
-            if uid['last_check_time']:
-                check_time = uid['last_check_time']
-                if isinstance(check_time, str):
-                    check_time = check_time[:16]
-                message += f"   ⏰ {check_time}\n"
-            
-            message += "\n"
-        
-        message += f"━━━━━━━━━━━━━━━━━━━━\n📊 *Tổng:* {len(uids)} UID"
-        
-        await update.message.reply_text(message, parse_mode="Markdown")
-        
-    except Exception as e:
-        print(f"List command error: {e}")
-        await update.message.reply_text("❌ *Có lỗi xảy ra!*")
-    finally:
-        conn.close()
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /stats command"""
-    user = update.effective_user
-    
-    conn = get_db()
-    c = conn.cursor()
-    
-    try:
-        # Get user stats
-        c.execute(
-            """SELECT 
+        if is_admin and user_id is None:
+            # ADMIN xem toàn hệ thống
+            cursor.execute('''
+                SELECT 
                     COUNT(*) as total,
-                    SUM(CASE WHEN current_status = 'LIVE' THEN 1 ELSE 0 END) as live,
-                    SUM(CASE WHEN current_status = 'DIE' THEN 1 ELSE 0 END) as die,
-                    SUM(CASE WHEN DATE(done_date) = DATE('now') THEN amount ELSE 0 END) as today_amount
-                FROM facebook_uids 
-                WHERE owner_id = (SELECT id FROM users WHERE telegram_id = ?)
-                AND is_active = 1""",
-            (str(user.id),)
-        )
-        stats = c.fetchone()
+                    SUM(CASE WHEN status = 'LIVE' THEN 1 ELSE 0 END) as live,
+                    SUM(CASE WHEN status = 'DIE' THEN 1 ELSE 0 END) as die,
+                    SUM(CASE WHEN tracking_status = 'PAUSED' THEN 1 ELSE 0 END) as paused
+                FROM uids 
+                WHERE tracking_status IN ('ACTIVE', 'PAUSED')
+            ''')
+        elif user_id:
+            # USER xem cá nhân
+            cursor.execute('''
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'LIVE' THEN 1 ELSE 0 END) as live,
+                    SUM(CASE WHEN status = 'DIE' THEN 1 ELSE 0 END) as die,
+                    SUM(CASE WHEN tracking_status = 'PAUSED' THEN 1 ELSE 0 END) as paused
+                FROM uids 
+                WHERE user_id = ? AND tracking_status IN ('ACTIVE', 'PAUSED')
+            ''', (user_id,))
+        else:
+            return {"total": 0, "live": 0, "die": 0, "paused": 0}
         
-        total = stats['total'] or 0
-        live = stats['live'] or 0
-        die = stats['die'] or 0
-        today_amount = stats['today_amount'] or 0
-        
-        # Get today's done count
-        c.execute(
-            """SELECT COUNT(*) as done_today
-                FROM facebook_uids 
-                WHERE owner_id = (SELECT id FROM users WHERE telegram_id = ?)
-                AND DATE(done_date) = DATE('now')
-                AND current_status = 'LIVE'""",
-            (str(user.id),)
-        )
-        today_done = c.fetchone()['done_today'] or 0
-        
-        message = (
-            "📊 *THỐNG KÊ CỦA BẠN*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📈 *Tổng UID:* {total}\n"
-            f"🟢 *LIVE:* {live}\n"
-            f"🔴 *DIE:* {die}\n"
-            f"🎯 *DONE hôm nay:* {today_done}\n"
-            f"💰 *Tiền hôm nay:* {today_amount:,.0f}đ\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 *Ngày:* {datetime.now().strftime('%d/%m/%Y')}"
-        )
-        
-        await update.message.reply_text(message, parse_mode="Markdown")
-        
-    except Exception as e:
-        print(f"Stats command error: {e}")
-        await update.message.reply_text("❌ *Có lỗi xảy ra!*")
-    finally:
+        row = cursor.fetchone()
         conn.close()
-
-async def mykey_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /mykey command"""
-    user = update.effective_user
-    
-    # Check if admin
-    if int(user.id) in SUPER_ADMIN_IDS:
-        await update.message.reply_text("👑 *Bạn là ADMIN* - Không cần KEY để sử dụng hệ thống.")
-        return
-    
-    conn = get_db()
-    c = conn.cursor()
-    
-    try:
-        # Get user's active key
-        c.execute(
-            """SELECT 
-                    k.key_value,
-                    k.created_at,
-                    k.expired_at,
-                    k.status
-                FROM access_keys k
-                JOIN users u ON k.owner_id = u.id
-                WHERE u.telegram_id = ?
-                AND k.status = 'ACTIVE'
-                AND k.expired_at > datetime('now')
-                ORDER BY k.expired_at DESC
-                LIMIT 1""",
-            (str(user.id),)
-        )
-        key_data = c.fetchone()
         
-        if not key_data:
-            await update.message.reply_text(
-                "❌ *Bạn chưa có KEY active!*\nLiên hệ admin để được cấp KEY."
-            )
-            return
+        return {
+            "total": row[0] or 0,
+            "live": row[1] or 0,
+            "die": row[2] or 0,
+            "paused": row[3] or 0
+        }
+    
+    # ==================== STATS THEO THỜI GIAN ====================
+    @staticmethod
+    def get_stats_period(user_id: int = None, period: str = "today", is_admin: bool = False) -> Dict:
+        """Lấy thống kê DONE theo thời gian"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
         
-        # Format dates
-        created_at = key_data['created_at']
-        expired_at = key_data['expired_at']
-        
-        if 'T' in created_at:
-            created_date = datetime.fromisoformat(created_at).strftime('%d/%m/%Y')
+        # Xác định thời gian
+        now = datetime.now()
+        if period == "today":
+            date_condition = "DATE(u.done_date) = DATE('now')"
+            period_text = "Hôm nay"
+        elif period == "week":
+            date_condition = "strftime('%Y-%W', u.done_date) = strftime('%Y-%W', 'now')"
+            period_text = "Tuần này"
+        elif period == "month":
+            date_condition = "strftime('%Y-%m', u.done_date) = strftime('%Y-%m', 'now')"
+            period_text = "Tháng này"
         else:
-            created_date = created_at[:10]
+            date_condition = "DATE(u.done_date) = DATE('now')"
+            period_text = "Hôm nay"
         
-        if 'T' in expired_at:
-            expired_date = datetime.fromisoformat(expired_at)
+        if is_admin and user_id is None:
+            # ADMIN xem toàn hệ thống
+            cursor.execute(f'''
+                SELECT 
+                    COUNT(DISTINCT u.id) as done_count,
+                    COALESCE(SUM(t.amount), 0) as total_amount,
+                    GROUP_CONCAT(DISTINCT u.uid) as done_uids
+                FROM uids u
+                LEFT JOIN transactions t ON u.id = t.uid_id
+                WHERE u.status = 'LIVE' 
+                AND u.done_date IS NOT NULL
+                AND {date_condition}
+            ''')
+        elif user_id:
+            # USER xem cá nhân
+            cursor.execute(f'''
+                SELECT 
+                    COUNT(DISTINCT u.id) as done_count,
+                    COALESCE(SUM(t.amount), 0) as total_amount,
+                    GROUP_CONCAT(DISTINCT u.uid) as done_uids
+                FROM uids u
+                LEFT JOIN transactions t ON u.id = t.uid_id
+                WHERE u.user_id = ? 
+                AND u.status = 'LIVE' 
+                AND u.done_date IS NOT NULL
+                AND {date_condition}
+            ''', (user_id,))
         else:
-            expired_date = datetime.strptime(expired_at, '%Y-%m-%d %H:%M:%S')
+            return {
+                "period": period_text,
+                "done_count": 0,
+                "total_amount": 0,
+                "done_uids": []
+            }
         
-        days_left = (expired_date - datetime.now()).days
-        
-        message = (
-            "🔑 *THÔNG TIN KEY*\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📝 *Key:* `{key_data['key_value']}`\n"
-            f"📅 *Ngày tạo:* {created_date}\n"
-            f"⏰ *Hết hạn:* {expired_date.strftime('%d/%m/%Y')}\n"
-            f"📊 *Còn lại:* {days_left} ngày\n"
-            f"🟢 *Trạng thái:* {key_data['status']}\n"
-            "━━━━━━━━━━━━━━━━━━━━"
-        )
-        
-        await update.message.reply_text(message, parse_mode="Markdown")
-        
-    except Exception as e:
-        print(f"Mykey command error: {e}")
-        await update.message.reply_text("❌ *Có lỗi xảy ra!*")
-    finally:
+        row = cursor.fetchone()
         conn.close()
-
-async def create_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin: Create new key"""
-    user = update.effective_user
+        
+        done_uids = row[2].split(',') if row[2] else []
+        
+        return {
+            "period": period_text,
+            "done_count": row[0] or 0,
+            "total_amount": row[1] or 0,
+            "done_uids": done_uids[:10],  # Chỉ lấy 10 UID đầu
+            "total_done_uids": len(done_uids)
+        }
     
-    # Check admin permission
-    if int(user.id) not in SUPER_ADMIN_IDS:
-        await update.message.reply_text("❌ *Chỉ ADMIN mới có quyền này!*")
-        return
-    
-    # Parse arguments
-    args = context.args
-    if len(args) < 2:
-        await update.message.reply_text(
-            "❌ *Sai cú pháp!*\n"
-            "Sử dụng: `/create_key <telegram_id> <số_ngày> [ghi_chú]`\n\n"
-            "*Ví dụ:*\n"
-            "`/create_key 123456789 30 Key cho khách VIP`"
-        )
-        return
-    
-    try:
-        telegram_id = args[0]
-        days = int(args[1])
-        notes = " ".join(args[2:]) if len(args) > 2 else None
+    # ==================== LƯU LOG THAY ĐỔI TRẠNG THÁI ====================
+    @staticmethod
+    def log_uid_status_change(uid_id: int, old_status: str, new_status: str, details: str = ""):
+        """Ghi log thay đổi trạng thái UID"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
         
-        if days <= 0:
-            await update.message.reply_text("❌ *Số ngày* phải lớn hơn 0")
-            return
-        
-        # Create key
-        key_value = KeyManager.create_key(telegram_id, days, notes)
-        
-        if key_value:
-            await update.message.reply_text(
-                f"✅ *ĐÃ TẠO KEY!*\n\n"
-                f"🔑 *Key:* `{key_value}`\n"
-                f"👤 *User:* {telegram_id}\n"
-                f"⏰ *Hạn:* {days} ngày\n"
-                f"📝 *Ghi chú:* {notes or 'Không có'}"
-            )
-        else:
-            await update.message.reply_text("❌ *Không thể tạo KEY!*")
-            
-    except ValueError:
-        await update.message.reply_text("❌ *Số ngày* không hợp lệ")
-    except Exception as e:
-        print(f"Create key command error: {e}")
-        await update.message.reply_text("❌ *Có lỗi xảy ra!*")
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /cancel command"""
-    await update.message.reply_text("❌ *Đã hủy thao tác*")
-    return ConversationHandler.END
-
-# ========== BACKGROUND CHECKER ==========
-async def check_all_uids(context: ContextTypes.DEFAULT_TYPE):
-    """Background task to check UIDs"""
-    checker = FacebookChecker()
-    conn = get_db()
-    c = conn.cursor()
-    
-    try:
-        # Get active UIDs
-        c.execute(
-            """SELECT 
-                    f.id,
-                    f.uid,
-                    f.current_status,
-                    u.telegram_id,
-                    f.customer_name,
-                    f.amount
-                FROM facebook_uids f
-                JOIN users u ON f.owner_id = u.id
-                WHERE f.is_active = 1"""
-        )
-        uids = c.fetchall()
-        
-        if not uids:
-            return
-        
-        for uid_data in uids:
-            try:
-                current_status = uid_data['current_status']
-                new_status = await checker.check_uid(uid_data['uid'])
-                
-                if new_status != current_status:
-                    now = datetime.now()
-                    c.execute(
-                        """UPDATE facebook_uids 
-                           SET last_status = ?, current_status = ?, last_check_time = ?, check_count = check_count + 1
-                           WHERE id = ?""",
-                        (current_status, new_status, now, uid_data['id'])
-                    )
-                    
-                    if current_status == 'DIE' and new_status == 'LIVE':
-                        c.execute("UPDATE facebook_uids SET done_date = ? WHERE id = ?", (now, uid_data['id']))
-                        amount_str = f"{uid_data['amount']:,.0f}đ".replace(",", ".")
-                        msg = (f"🎉 *DONE KÈO FACEBOOK*\n━━━━━━━━━━━━━━━━━━━━\n👤 *Khách:* {uid_data['customer_name']}\n🆔 *UID:* `{uid_data['uid']}`\n💰 *Tiền:* {amount_str}")
-                        await context.bot.send_message(chat_id=uid_data['telegram_id'], text=msg, parse_mode="Markdown")
-                
-                else:
-                    c.execute("UPDATE facebook_uids SET last_check_time = ?, check_count = check_count + 1 WHERE id = ?", (datetime.now(), uid_data['id']))
-                
-                await asyncio.sleep(0.5) # Rate limiting
-            except Exception as e:
-                print(f"Error check UID {uid_data['uid']}: {e}")
+        cursor.execute('''
+            INSERT INTO uid_logs (uid_id, old_status, new_status, details)
+            VALUES (?, ?, ?, ?)
+        ''', (uid_id, old_status, new_status, details))
         
         conn.commit()
-    finally:
         conn.close()
-        await checker.close()
+    
+    # ==================== LƯU LỊCH SỬ TRẠNG THÁI HÀNG NGÀY ====================
+    @staticmethod
+    def save_daily_status(user_id: int):
+        """Lưu trạng thái hàng ngày của user"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
+        
+        # Lấy trạng thái hiện tại
+        status = Database.get_current_status(user_id)
+        
+        # Kiểm tra đã lưu hôm nay chưa
+        cursor.execute('''
+            SELECT COUNT(*) FROM status_history 
+            WHERE user_id = ? AND record_date = DATE('now')
+        ''', (user_id,))
+        
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('''
+                INSERT INTO status_history 
+                (user_id, total_uids, live_uids, die_uids, paused_uids)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, status['total'], status['live'], status['die'], status['paused']))
+        
+        conn.commit()
+        conn.close()
+    
+    # ==================== LƯU DOANH THU ====================
+    @staticmethod
+    def save_revenue_log(user_id: int, amount: int, period: str):
+        """Lưu log doanh thu"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO revenue_logs (user_id, amount, period)
+            VALUES (?, ?, ?)
+        ''', (user_id, amount, period))
+        
+        conn.commit()
+        conn.close()
+    
+    # ==================== UID LONG TRACKING ====================
+    @staticmethod
+    def update_uid_status_long_tracking(uid_id: int, new_status: str):
+        """Cập nhật trạng thái UID với tracking dài hạn"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
+        
+        # Lấy thông tin cũ
+        cursor.execute("SELECT status, first_live_date FROM uids WHERE id = ?", (uid_id,))
+        old_status, first_live_date = cursor.fetchone()
+        
+        now = datetime.now()
+        
+        if new_status == "LIVE" and old_status == "DIE":
+            # DIE -> LIVE: Đây là DONE
+            done_date = now
+            if not first_live_date:
+                first_live_date = now
+        else:
+            done_date = None
+        
+        # Cập nhật
+        cursor.execute('''
+            UPDATE uids 
+            SET status = ?, last_checked = ?, done_date = ?, first_live_date = ?
+            WHERE id = ?
+        ''', (new_status, now, done_date, first_live_date, uid_id))
+        
+        # Nếu DONE (DIE -> LIVE), thêm vào transactions
+        if new_status == "LIVE" and old_status == "DIE":
+            cursor.execute("SELECT amount, user_id FROM uids WHERE id = ?", (uid_id,))
+            amount, user_id = cursor.fetchone()
+            
+            cursor.execute('''
+                INSERT INTO transactions (uid_id, user_id, amount, transaction_date)
+                VALUES (?, ?, ?, ?)
+            ''', (uid_id, user_id, amount, now))
+            
+            # Lưu log doanh thu
+            Database.save_revenue_log(user_id, amount, "daily")
+        
+        # Log thay đổi trạng thái
+        Database.log_uid_status_change(
+            uid_id, 
+            old_status, 
+            new_status,
+            f"Auto check at {now}"
+        )
+        
+        conn.commit()
+        conn.close()
+        
+        # Trả về thông tin để gửi notify
+        return {
+            "uid_id": uid_id,
+            "old_status": old_status,
+            "new_status": new_status,
+            "is_done": (old_status == "DIE" and new_status == "LIVE")
+        }
+    
+    # ==================== LẤY DỮ LIỆU BÁO CÁO THÁNG ====================
+    @staticmethod
+    def get_monthly_report_data(month: int = None, year: int = None):
+        """Lấy dữ liệu báo cáo tháng"""
+        conn = Database.get_conn()
+        conn.row_factory = Database.dict_factory
+        cursor = conn.cursor()
+        
+        if month is None:
+            month = datetime.now().month
+        if year is None:
+            year = datetime.now().year
+        
+        # Tổng kết
+        cursor.execute('''
+            SELECT 
+                COUNT(DISTINCT u.id) as total_uids,
+                SUM(CASE WHEN u.status = 'LIVE' AND strftime('%Y-%m', u.done_date) = ? THEN 1 ELSE 0 END) as total_done,
+                COALESCE(SUM(CASE WHEN strftime('%Y-%m', u.done_date) = ? THEN t.amount ELSE 0 END), 0) as total_revenue
+            FROM uids u
+            LEFT JOIN transactions t ON u.id = t.uid_id
+            WHERE strftime('%Y-%m', u.received_date) <= ?
+        ''', (f"{year}-{month:02d}", f"{year}-{month:02d}", f"{year}-{month:02d}"))
+        
+        summary = cursor.fetchone()
+        
+        # Chi tiết kèo DONE
+        cursor.execute('''
+            SELECT 
+                u.uid,
+                u.customer_name,
+                u.amount,
+                u.received_date,
+                u.done_date,
+                k.key,
+                us.username
+            FROM uids u
+            LEFT JOIN api_keys k ON u.key_id = k.id
+            LEFT JOIN users us ON u.user_id = us.id
+            WHERE u.status = 'LIVE' 
+            AND strftime('%Y-%m', u.done_date) = ?
+            ORDER BY u.done_date DESC
+        ''', (f"{year}-{month:02d}",))
+        
+        details = cursor.fetchall()
+        
+        # Thống kê theo user
+        cursor.execute('''
+            SELECT 
+                us.username,
+                COUNT(DISTINCT u.id) as uids_count,
+                SUM(CASE WHEN u.status = 'LIVE' AND strftime('%Y-%m', u.done_date) = ? THEN 1 ELSE 0 END) as done_count,
+                COALESCE(SUM(CASE WHEN strftime('%Y-%m', u.done_date) = ? THEN u.amount ELSE 0 END), 0) as revenue
+            FROM users us
+            LEFT JOIN uids u ON us.id = u.user_id
+            WHERE us.role = 'USER'
+            GROUP BY us.id
+            ORDER BY revenue DESC
+        ''', (f"{year}-{month:02d}", f"{year}-{month:02d}"))
+        
+        users_stats = cursor.fetchall()
+        
+        conn.close()
+        
+        return {
+            "summary": summary,
+            "details": details,
+            "users_stats": users_stats,
+            "month": month,
+            "year": year
+        }
 
-# ========== MAIN APPLICATION (ĐÃ FIX KHAI BÁO HÀM) ==========
-async def main():
-    """Hàm khởi chạy chính - Giữ nguyên 100% logic gốc"""
+# ==================== EXCEL REPORT GENERATOR ====================
+class ExcelReport:
+    @staticmethod
+    def generate_monthly_report(month: int, year: int) -> BytesIO:
+        """Tạo file Excel báo cáo tháng"""
+        # Lấy dữ liệu
+        data = Database.get_monthly_report_data(month, year)
+        
+        # Tạo workbook
+        wb = Workbook()
+        
+        # ========== SHEET 1: TỔNG KẾT ==========
+        ws1 = wb.active
+        ws1.title = "Tổng kết"
+        
+        # Header style
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        header_alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Data style
+        data_font = Font(size=11)
+        border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # Tiêu đề
+        ws1.merge_cells('A1:E1')
+        ws1['A1'] = f"BÁO CÁO TỔNG KẾT THÁNG {month}/{year}"
+        ws1['A1'].font = Font(size=14, bold=True, color="366092")
+        ws1['A1'].alignment = Alignment(horizontal="center")
+        
+        # Tổng kết
+        summary_data = [
+            ["CHỈ SỐ", "GIÁ TRỊ", "GHI CHÚ"],
+            ["Tổng số UID", data['summary']['total_uids'], "Tất cả UID đang theo dõi"],
+            ["Tổng kèo DONE", data['summary']['total_done'], f"Tháng {month}/{year}"],
+            ["Tổng doanh thu", f"{data['summary']['total_revenue']:,}đ", f"Tháng {month}/{year}"],
+            ["Tỷ lệ DONE", f"{(data['summary']['total_done']/data['summary']['total_uids']*100):.1f}%" if data['summary']['total_uids'] > 0 else "0%", "DONE/Tổng UID"]
+        ]
+        
+        # Write summary
+        for row_idx, row in enumerate(summary_data, start=3):
+            for col_idx, value in enumerate(row, start=1):
+                cell = ws1.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = border
+                if row_idx == 3:  # Header
+                    cell.fill = header_fill
+                    cell.font = header_font
+                    cell.alignment = header_alignment
+                else:
+                    cell.font = data_font
+        
+        # Auto size columns
+        for col in ws1.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)
+            ws1.column_dimensions[column].width = adjusted_width
+        
+        # ========== SHEET 2: CHI TIẾT KÈO DONE ==========
+        ws2 = wb.create_sheet(title="Chi tiết kèo DONE")
+        
+        # Header
+        headers = ["UID", "Khách hàng", "Số tiền", "Ngày nhận", "Ngày DONE", "KEY", "User"]
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws2.cell(row=1, column=col_idx, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+            cell.border = border
+        
+        # Data
+        for row_idx, detail in enumerate(data['details'], start=2):
+            ws2.cell(row=row_idx, column=1, value=detail['uid']).border = border
+            ws2.cell(row=row_idx, column=2, value=detail['customer_name']).border = border
+            ws2.cell(row=row_idx, column=3, value=detail['amount']).border = border
+            ws2.cell(row=row_idx, column=4, value=detail['received_date']).border = border
+            ws2.cell(row=row_idx, column=5, value=detail['done_date']).border = border
+            ws2.cell(row=row_idx, column=6, value=detail['key'][:12] + "..." if detail['key'] else "").border = border
+            ws2.cell(row=row_idx, column=7, value=detail['username']).border = border
+        
+        # Auto size columns
+        for col in ws2.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 30)
+            ws2.column_dimensions[column].width = adjusted_width
+        
+        # ========== SHEET 3: THỐNG KÊ USER ==========
+        ws3 = wb.create_sheet(title="Thống kê User")
+        
+        # Header
+        user_headers = ["Username", "Số UID", "Kèo DONE", "Doanh thu", "Tỷ lệ DONE"]
+        for col_idx, header in enumerate(user_headers, start=1):
+            cell = ws3.cell(row=1, column=col_idx, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = header_alignment
+            cell.border = border
+        
+        # Data
+        for row_idx, user_stat in enumerate(data['users_stats'], start=2):
+            ws3.cell(row=row_idx, column=1, value=user_stat['username']).border = border
+            ws3.cell(row=row_idx, column=2, value=user_stat['uids_count']).border = border
+            ws3.cell(row=row_idx, column=3, value=user_stat['done_count']).border = border
+            ws3.cell(row=row_idx, column=4, value=user_stat['revenue']).border = border
+            ratio = (user_stat['done_count'] / user_stat['uids_count'] * 100) if user_stat['uids_count'] > 0 else 0
+            ws3.cell(row=row_idx, column=5, value=f"{ratio:.1f}%").border = border
+        
+        # Auto size columns
+        for col in ws3.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 20)
+            ws3.column_dimensions[column].width = adjusted_width
+        
+        # Save to BytesIO
+        excel_file = BytesIO()
+        wb.save(excel_file)
+        excel_file.seek(0)
+        
+        return excel_file
+
+# ==================== UI FORMATTER UPDATE ====================
+class UIFormatter:
+    @staticmethod
+    def format_status(status: Dict) -> str:
+        """Format message trạng thái HIỆN TẠI"""
+        return f"""
+📊 *TRẠNG THÁI HIỆN TẠI*
+━━━━━━━━━━━━━━━━━━
+• 📈 Tổng UID: *{status['total']}*
+• 🟢 LIVE: *{status['live']}*
+• 🔴 DIE: *{status['die']}*
+• ⏸️ PAUSED: *{status['paused']}*
+━━━━━━━━━━━━━━━━━━
+*Lưu ý:* Chỉ tính UID đang theo dõi (ACTIVE/PAUSED)
+        """.strip()
+    
+    @staticmethod
+    def format_stats(stats: Dict) -> str:
+        """Format message thống kê DONE theo thời gian"""
+        period = stats.get('period', 'Hôm nay')
+        
+        return f"""
+📈 *THỐNG KÊ {period.upper()}*
+━━━━━━━━━━━━━━━━━━
+• ✅ Kèo DONE: *{stats['done_count']}*
+• 💰 Tổng tiền: *{stats['total_amount']:,}đ*
+• 🆔 UID DONE: *{stats['total_done_uids']}*
+━━━━━━━━━━━━━━━━━━
+*UID DONE gần nhất:*
+{', '.join([f'`{uid}`' for uid in stats['done_uids']]) if stats['done_uids'] else 'Chưa có'}
+━━━━━━━━━━━━━━━━━━
+        """.strip()
+    
+    @staticmethod
+    def format_time_period_menu() -> str:
+        """Menu chọn thời gian cho stats"""
+        return """
+📅 *CHỌN THỜI GIAN THỐNG KÊ*
+━━━━━━━━━━━━━━━━━━
+Vui lòng chọn thời gian bạn muốn xem thống kê:
+        """.strip()
+
+# ==================== KEYBOARDS UPDATE ====================
+class Keyboards:
+    @staticmethod
+    def time_period_menu():
+        keyboard = [
+            [
+                InlineKeyboardButton("📅 Hôm nay", callback_data="stats_today"),
+                InlineKeyboardButton("📆 Tuần này", callback_data="stats_week")
+            ],
+            [
+                InlineKeyboardButton("📊 Tháng này", callback_data="stats_month"),
+                InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")
+            ]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def main_menu():
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Trạng thái", callback_data="status"),
+                InlineKeyboardButton("📈 Thống kê", callback_data="stats_menu")
+            ],
+            [
+                InlineKeyboardButton("➕ Thêm UID", callback_data="add_uid"),
+                InlineKeyboardButton("📋 Danh sách UID", callback_data="list_uids")
+            ],
+            [
+                InlineKeyboardButton("🔑 KEY của tôi", callback_data="my_keys"),
+                InlineKeyboardButton("📄 Báo cáo DONE", callback_data="report_today")
+            ]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+# ==================== MAIN BOT CLASS UPDATE ====================
+class FBBot:
+    def __init__(self):
+        self.application = None
+        self.user_sessions = {}
+        self.checker_running = True
+    
+    # ==================== COMMAND HANDLERS ====================
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /status - Hiển thị trạng thái HIỆN TẠI"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            await update.message.reply_text("❌ User không tồn tại")
+            return
+        
+        is_admin = user.role == "ADMIN"
+        
+        # Lấy trạng thái hiện tại
+        if is_admin and context.args and context.args[0] == "all":
+            status = Database.get_current_status(is_admin=True)
+        elif is_admin:
+            # ADMIN mặc định xem toàn hệ thống
+            status = Database.get_current_status(is_admin=True)
+        else:
+            status = Database.get_current_status(user.id)
+        
+        await update.message.reply_text(
+            UIFormatter.format_status(status),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /stats - Hiển thị menu chọn thời gian"""
+        await update.message.reply_text(
+            UIFormatter.format_time_period_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.time_period_menu()
+        )
+    
+    async def stats_today_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /stats_today - Thống kê hôm nay"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            await update.message.reply_text("❌ User không tồn tại")
+            return
+        
+        is_admin = user.role == "ADMIN"
+        
+        stats = Database.get_stats_period(
+            user_id=user.id if not is_admin else None,
+            period="today",
+            is_admin=is_admin
+        )
+        
+        await update.message.reply_text(
+            UIFormatter.format_stats(stats),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def stats_week_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /stats_week - Thống kê tuần này"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            await update.message.reply_text("❌ User không tồn tại")
+            return
+        
+        is_admin = user.role == "ADMIN"
+        
+        stats = Database.get_stats_period(
+            user_id=user.id if not is_admin else None,
+            period="week",
+            is_admin=is_admin
+        )
+        
+        await update.message.reply_text(
+            UIFormatter.format_stats(stats),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def stats_month_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /stats_month - Thống kê tháng này"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            await update.message.reply_text("❌ User không tồn tại")
+            return
+        
+        is_admin = user.role == "ADMIN"
+        
+        stats = Database.get_stats_period(
+            user_id=user.id if not is_admin else None,
+            period="month",
+            is_admin=is_admin
+        )
+        
+        await update.message.reply_text(
+            UIFormatter.format_stats(stats),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    # ==================== CALLBACK HANDLERS ====================
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Xử lý callback từ inline keyboard"""
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = update.effective_user.id
+        data = query.data
+        
+        if data == "status":
+            await self.show_status(update, context)
+        elif data == "stats_menu":
+            await self.show_stats_menu(update, context)
+        elif data == "stats_today":
+            await self.show_stats_today(update, context)
+        elif data == "stats_week":
+            await self.show_stats_week(update, context)
+        elif data == "stats_month":
+            await self.show_stats_month(update, context)
+        elif data == "back_main":
+            await self.show_main_menu(update, context)
+    
+    async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hiển thị trạng thái qua callback"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            return
+        
+        is_admin = user.role == "ADMIN"
+        status = Database.get_current_status(user.id if not is_admin else None, is_admin)
+        
+        await update.callback_query.message.edit_text(
+            UIFormatter.format_status(status),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def show_stats_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hiển thị menu stats qua callback"""
+        await update.callback_query.message.edit_text(
+            UIFormatter.format_time_period_menu(),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.time_period_menu()
+        )
+    
+    async def show_stats_today(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hiển thị stats hôm nay qua callback"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            return
+        
+        is_admin = user.role == "ADMIN"
+        stats = Database.get_stats_period(
+            user_id=user.id if not is_admin else None,
+            period="today",
+            is_admin=is_admin
+        )
+        
+        await update.callback_query.message.edit_text(
+            UIFormatter.format_stats(stats),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def show_stats_week(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hiển thị stats tuần này qua callback"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            return
+        
+        is_admin = user.role == "ADMIN"
+        stats = Database.get_stats_period(
+            user_id=user.id if not is_admin else None,
+            period="week",
+            is_admin=is_admin
+        )
+        
+        await update.callback_query.message.edit_text(
+            UIFormatter.format_stats(stats),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def show_stats_month(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hiển thị stats tháng này qua callback"""
+        user_id = update.effective_user.id
+        user = Database.get_user(user_id)
+        
+        if not user:
+            return
+        
+        is_admin = user.role == "ADMIN"
+        stats = Database.get_stats_period(
+            user_id=user.id if not is_admin else None,
+            period="month",
+            is_admin=is_admin
+        )
+        
+        await update.callback_query.message.edit_text(
+            UIFormatter.format_stats(stats),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Hiển thị menu chính"""
+        await update.callback_query.message.edit_text(
+            "📱 *MENU CHÍNH*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    # ==================== SCHEDULER UPDATE ====================
+    async def check_uids_long_tracking(self, context: ContextTypes.DEFAULT_TYPE):
+        """Check UID với tracking dài hạn"""
+        if not self.checker_running:
+            return
+        
+        conn = Database.get_conn()
+        cursor = conn.cursor()
+        
+        # Chỉ lấy UID có tracking_status = 'ACTIVE' và long_tracking = 1
+        cursor.execute('''
+            SELECT u.id, u.uid, u.status, u.user_id, us.telegram_id
+            FROM uids u
+            JOIN users us ON u.user_id = us.id
+            WHERE u.tracking_status = 'ACTIVE' 
+            AND u.long_tracking = 1
+            AND u.removed_at IS NULL
+        ''')
+        
+        uids = cursor.fetchall()
+        conn.close()
+        
+        for uid_id, uid_str, current_status, user_id, telegram_id in uids:
+            # TODO: Thực hiện check UID thực tế với Facebook API
+            new_status = await self.check_facebook_uid(uid_str)
+            
+            if new_status != current_status:
+                # Cập nhật với tracking dài hạn
+                result = Database.update_uid_status_long_tracking(uid_id, new_status)
+                
+                # Gửi notify nếu có thay đổi
+                if result and result["is_done"]:
+                    await self.send_done_notification(uid_id, telegram_id, context)
+                elif result:
+                    await self.send_status_change_notification(
+                        uid_id, telegram_id, 
+                        result["old_status"], result["new_status"], 
+                        context
+                    )
+        
+        # Lưu trạng thái hàng ngày cho tất cả user
+        await self.save_all_users_daily_status()
+    
+    async def check_facebook_uid(self, uid: str) -> str:
+        """Check trạng thái UID trên Facebook - LOGIC MẪU"""
+        import random
+        return "LIVE" if random.random() > 0.3 else "DIE"
+    
+    async def send_done_notification(self, uid_id: int, telegram_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Gửi thông báo khi UID DONE"""
+        conn = Database.get_conn()
+        conn.row_factory = Database.dict_factory
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT u.* FROM uids u WHERE u.id = ?
+        ''', (uid_id,))
+        
+        uid_data = cursor.fetchone()
+        conn.close()
+        
+        if uid_data:
+            uid_data['received_date'] = datetime.fromisoformat(uid_data['received_date']) if uid_data['received_date'] else None
+            uid_data['done_date'] = datetime.fromisoformat(uid_data['done_date']) if uid_data['done_date'] else None
+            
+            done_msg = f"""
+━━━━━━━━━━━━━━━━━━
+✅ *DONE KÈO FACEBOOK*
+━━━━━━━━━━━━━━━━━━
+👤 *Khách hàng:* {uid_data['customer_name']}
+🆔 *UID:* `{uid_data['uid']}`
+💰 *Số tiền:* {uid_data['amount']:,}đ
+
+📅 *Ngày nhận:* {uid_data['received_date'].strftime('%d/%m/%Y %H:%M')}
+🎉 *Ngày DONE:* {datetime.now().strftime('%d/%m/%Y %H:%M')}
+━━━━━━━━━━━━━━━━━━
+            """.strip()
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=done_msg,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"Error sending done notification: {e}")
+    
+    async def send_status_change_notification(self, uid_id: int, telegram_id: int, 
+                                            old_status: str, new_status: str, 
+                                            context: ContextTypes.DEFAULT_TYPE):
+        """Gửi thông báo khi UID thay đổi trạng thái (không phải DONE)"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT uid, customer_name FROM uids WHERE id = ?", (uid_id,))
+        uid_data = cursor.fetchone()
+        conn.close()
+        
+        if uid_data:
+            uid_str, customer_name = uid_data
+            
+            emoji_old = "🟢" if old_status == "LIVE" else "🔴"
+            emoji_new = "🟢" if new_status == "LIVE" else "🔴"
+            
+            status_msg = f"""
+🔄 *THAY ĐỔI TRẠNG THÁI UID*
+━━━━━━━━━━━━━━━━━━
+👤 Khách hàng: {customer_name}
+🆔 UID: `{uid_str}`
+
+{emoji_old} Trạng thái cũ: {old_status}
+{emoji_new} Trạng thái mới: {new_status}
+
+⏰ Thời gian: {datetime.now().strftime('%d/%m/%Y %H:%M')}
+━━━━━━━━━━━━━━━━━━
+            """.strip()
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=telegram_id,
+                    text=status_msg,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                print(f"Error sending status change notification: {e}")
+    
+    async def save_all_users_daily_status(self):
+        """Lưu trạng thái hàng ngày cho tất cả user"""
+        conn = Database.get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id FROM users")
+        users = cursor.fetchall()
+        conn.close()
+        
+        for (user_id,) in users:
+            Database.save_daily_status(user_id)
+    
+    # ==================== MONTHLY REPORT SCHEDULER ====================
+    async def generate_monthly_report(self, context: ContextTypes.DEFAULT_TYPE):
+        """Tự động tạo và gửi báo cáo tháng"""
+        now = datetime.now()
+        
+        # Kiểm tra có phải là 23:59 ngày cuối tháng không
+        if now.hour == 23 and now.minute == 59:
+            # Tính tháng trước (vì báo cáo cho tháng vừa kết thúc)
+            if now.month == 1:
+                report_month = 12
+                report_year = now.year - 1
+            else:
+                report_month = now.month - 1
+                report_year = now.year
+            
+            # Tạo file Excel
+            excel_file = ExcelReport.generate_monthly_report(report_month, report_year)
+            
+            # Gửi cho ADMIN
+            try:
+                await context.bot.send_document(
+                    chat_id=ADMIN_ID,
+                    document=InputFile(
+                        excel_file, 
+                        filename=f"report_{report_month:02d}_{report_year}.xlsx"
+                    ),
+                    caption=f"📊 *BÁO CÁO TỔNG KẾT THÁNG {report_month}/{report_year}*\n\n"
+                            f"Được tạo tự động lúc: {now.strftime('%d/%m/%Y %H:%M')}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                print(f"✅ Đã gửi báo cáo tháng {report_month}/{report_year} cho ADMIN")
+            except Exception as e:
+                print(f"❌ Lỗi gửi báo cáo tháng: {e}")
+    
+    async def manual_monthly_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /report_month - Tạo báo cáo tháng thủ công (ADMIN ONLY)"""
+        user_id = update.effective_user.id
+        
+        if not Database.is_admin(user_id):
+            await update.message.reply_text("❌ Chỉ ADMIN mới có quyền này")
+            return
+        
+        # Lấy tháng từ args, mặc định là tháng trước
+        now = datetime.now()
+        if context.args and len(context.args) >= 2:
+            try:
+                report_month = int(context.args[0])
+                report_year = int(context.args[1])
+            except ValueError:
+                await update.message.reply_text("⚠️ Sử dụng: `/report_month <tháng> <năm>`")
+                return
+        else:
+            if now.month == 1:
+                report_month = 12
+                report_year = now.year - 1
+            else:
+                report_month = now.month - 1
+                report_year = now.year
+        
+        await update.message.reply_text(
+            f"⏳ Đang tạo báo cáo tháng {report_month}/{report_year}..."
+        )
+        
+        # Tạo file Excel
+        excel_file = ExcelReport.generate_monthly_report(report_month, report_year)
+        
+        # Gửi file
+        await update.message.reply_document(
+            document=InputFile(
+                excel_file, 
+                filename=f"report_{report_month:02d}_{report_year}.xlsx"
+            ),
+            caption=f"📊 *BÁO CÁO TỔNG KẾT THÁNG {report_month}/{report_year}*\n\n"
+                    f"Được tạo thủ công bởi ADMIN",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    # ==================== SETUP ====================
+    def setup_handlers(self):
+        """Thiết lập các command handler mới"""
+        # Command mới
+        self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("stats", self.stats_command))
+        self.application.add_handler(CommandHandler("stats_today", self.stats_today_command))
+        self.application.add_handler(CommandHandler("stats_week", self.stats_week_command))
+        self.application.add_handler(CommandHandler("stats_month", self.stats_month_command))
+        self.application.add_handler(CommandHandler("report_month", self.manual_monthly_report))
+        
+        # Callback handler
+        self.application.add_handler(CallbackQueryHandler(self.handle_callback))
+        
+        # Command cũ (giữ lại)
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+    
+    def setup_scheduler(self):
+        """Thiết lập scheduler mới"""
+        job_queue = self.application.job_queue
+        
+        # Check UID với tracking dài hạn mỗi phút
+        job_queue.run_repeating(self.check_uids_long_tracking, interval=CHECK_INTERVAL, first=10)
+        
+        # Tạo báo cáo tháng tự động lúc 23:59 ngày cuối tháng
+        # Chạy mỗi phút để kiểm tra thời điểm
+        job_queue.run_repeating(self.generate_monthly_report, interval=60, first=10)
+        
+        # Lưu trạng thái hàng ngày lúc 00:01 mỗi ngày
+        job_queue.run_daily(
+            self.save_all_users_daily_status,
+            time=datetime.time(hour=0, minute=1),
+            days=(0, 1, 2, 3, 4, 5, 6)
+        )
+    
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /start cơ bản"""
+        await update.message.reply_text(
+            "👋 Chào mừng đến với FB KÈO BOT\n\n"
+            "Sử dụng /help để xem danh sách lệnh",
+            reply_markup=Keyboards.main_menu()
+        )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Lệnh /help cập nhật"""
+        help_text = """
+📚 *DANH SÁCH LỆNH MỚI*
+
+*TRẠNG THÁI & THỐNG KÊ:*
+• /status - Trạng thái UID hiện tại
+• /stats - Menu thống kê theo thời gian
+• /stats_today - Thống kê DONE hôm nay
+• /stats_week - Thống kê DONE tuần này
+• /stats_month - Thống kê DONE tháng này
+
+*BÁO CÁO (ADMIN):*
+• /report_month - Xuất báo cáo Excel (thủ công)
+
+*LỆNH KHÁC:*
+• /start - Bắt đầu bot
+• /help - Xem danh sách lệnh
+        """.strip()
+        
+        await update.message.reply_text(
+            help_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    async def run(self):
+        """Chạy bot"""
+        # Khởi tạo database
+        init_database()
+        
+        # Tạo application
+        self.application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Thiết lập handlers
+        self.setup_handlers()
+        
+        # Thiết lập scheduler
+        self.setup_scheduler()
+        
+        # Chạy bot
+        await self.application.initialize()
+        await self.application.start()
+        print("🤖 Bot đang chạy với tracking dài hạn...")
+        
+        # Giữ bot chạy
+        await self.application.updater.start_polling()
+        await asyncio.Event().wait()
+
+# ==================== MAIN ====================
+if __name__ == "__main__":
     logging.basicConfig(
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        level=getattr(logging, LOG_LEVEL)
+        level=logging.INFO
     )
     
-    print("=" * 50)
-    print("Starting Facebook UID Tracker Bot")
-    print(f"BOT_TOKEN: {'✓' if BOT_TOKEN else '✗'}")
-    print(f"SUPER_ADMIN_IDS: {SUPER_ADMIN_IDS}")
-    print(f"CHECK_INTERVAL: {CHECK_INTERVAL_MINUTES} minutes")
-    print("=" * 50)
+    bot = FBBot()
     
-    init_database()
-    
-    # 1. Khởi tạo Application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # 2. Đăng ký luồng thêm UID (ConversationHandler)
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", add_command)],
-        states={
-            ADDING_UID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_uid_input)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)]
-    )
-    
-    # 3. ĐĂNG KÝ TẤT CẢ CÁC LỆNH KHÁC (Fix lỗi không phản hồi)
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("list", list_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("mykey", mykey_command))
-    application.add_handler(CommandHandler("create_key", create_key_command))
-    application.add_handler(conv_handler)
-    
-    # 4. Thiết lập JobQueue (Chạy ngầm quét UID)
-    if application.job_queue:
-        application.job_queue.run_repeating(
-            check_all_uids, 
-            interval=CHECK_INTERVAL_MINUTES * 60, 
-            first=10
-        )
-        logging.info("✅ JobQueue đã được kích hoạt thành công.")
-
-    # 5. Khởi chạy Bot an toàn trên Railway (Sửa lỗi Loop)
-    async with application:
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        logging.info("🚀 Bot đang Online và lắng nghe tin nhắn...")
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
-            pass
-        finally:
-            await application.updater.stop()
-            await application.stop()
-            await application.shutdown()
-
-if __name__ == "__main__":
-    # Giải quyết triệt để lỗi 'This event loop is already running'
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(main())
-        else:
-            loop.run_until_complete(main())
-    except RuntimeError:
-        asyncio.run(main())
+        asyncio.run(bot.run())
+    except KeyboardInterrupt:
+        print("\n👋 Bot đã dừng")
