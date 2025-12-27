@@ -14,7 +14,7 @@ from telegram.constants import ParseMode
 import httpx # Cần thiết để check UID thật
 
 # ==================== CẤU HÌNH ====================
-BOT_TOKEN = "8388735235:AAG0jG2-gNmkaxUG7rcF4D3vqAfaoOiOjEk"
+BOT_TOKEN = "8388735235:AAH4KXWjovvSoK2Ja23MfkcdXVTty3c6ui8"
 ADMIN_ID = 5522878843  # <--- THAY ID CỦA BẠN VÀO ĐÂY
 DB_FILE = "fb_keo_bot_v4.db"
 CHECK_INTERVAL = 60 
