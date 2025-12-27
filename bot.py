@@ -38,12 +38,12 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 # ==================== CẤU HÌNH ====================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8388735235:AAEdJPWlZxo9Vm5rVIYGsFIeJ44wWTuT3D0"
 CHECK_INTERVAL = 60  # Giây
 DB_FILE = "fb_keo_bot.db"
 DEFAULT_UID_LIMIT = 10
 DEFAULT_EXPIRE_DAYS = 30
-ADMIN_ID = 123456789  # Thay bằng ID ADMIN thực tế
+ADMIN_ID = 5522878843  # Thay bằng ID ADMIN thực tế
 
 # ==================== DATABASE UPDATE ====================
 def init_database():
