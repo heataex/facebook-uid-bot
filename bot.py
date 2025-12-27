@@ -3,37 +3,29 @@ import asyncio
 import datetime
 import pandas as pd
 import httpx
-from typing import List
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-    JobQueue
-)
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
-from sqlalchemy.sql import func
+import os
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, filters
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, func
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-# --- CONFIGURATION ---
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-ADMIN_ID = 123456789  # Thay ID của bạn vào đây
+# --- CONFIG ---
+TOKEN = "YOUR_BOT_TOKEN"
+ADMIN_ID = 123456789 # Thay bằng ID thật của bạn
 DB_URL = "sqlite:///fb_monitor.db"
 
-# --- DATABASE SETUP ---
 Base = declarative_base()
+engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
 
+# --- MODELS ---
 class UserKey(Base):
     __tablename__ = 'keys'
     id = Column(Integer, primary_key=True)
     key_code = Column(String, unique=True)
-    owner_id = Column(Integer) # Telegram User ID
-    created_at = Column(DateTime, default=datetime.datetime.now)
+    owner_id = Column(Integer, unique=True, nullable=True)
     expire_at = Column(DateTime)
-    status = Column(String, default="active") # active, banned, expired
+    status = Column(String, default="active") # active, banned
 
 class FacebookUID(Base):
     __tablename__ = 'uids'
@@ -41,162 +33,114 @@ class FacebookUID(Base):
     uid = Column(String)
     customer_name = Column(String)
     price = Column(Float)
-    last_status = Column(String) # LIVE, DIE
+    last_status = Column(String, default="DIE")
     created_at = Column(DateTime, default=datetime.datetime.now)
     done_at = Column(DateTime, nullable=True)
-    added_by = Column(Integer) # Telegram User ID
+    added_by = Column(Integer)
     is_active = Column(Boolean, default=True)
 
-engine = create_engine(DB_URL)
 Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
 
 # --- LOGGING ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
-# --- HELPERS ---
-def check_key_valid(user_id):
-    session = Session()
-    key = session.query(UserKey).filter(UserKey.owner_id == user_id, UserKey.status == "active").first()
-    if key and key.expire_at > datetime.datetime.now():
-        session.close()
-        return True
-    session.close()
-    return False
+# --- CORE LOGIC ---
+def is_valid_user(user_id):
+    if user_id == ADMIN_ID: return True
+    db = SessionLocal()
+    key = db.query(UserKey).filter(UserKey.owner_id == user_id, UserKey.status == "active").first()
+    valid = key and key.expire_at > datetime.datetime.now()
+    db.close()
+    return valid
 
-async def check_fb_status(uid: str) -> str:
-    """
-    Logic check UID Facebook. 
-    Thay thế URL API thực tế của bạn vào đây.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            # Giả lập call API check UID
-            # r = await client.get(f"https://graph.facebook.com/{uid}/picture?type=normal")
-            # return "LIVE" if r.status_code == 200 else "DIE"
-            return "LIVE" # Mockup
-    except Exception:
-        return "DIE"
-
-# --- JOBS ---
-async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    session = Session()
-    uids = session.query(FacebookUID).filter(FacebookUID.is_active == True).all()
+# --- JOB: CHECK UID ---
+async def check_uids_job(context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    active_uids = db.query(FacebookUID).filter(FacebookUID.is_active == True).all()
     
-    for item in uids:
-        # Check key của người sở hữu UID còn hạn không
-        if not check_key_valid(item.added_by):
-            continue
-
-        current_status = await check_fb_status(item.uid)
-        
-        if item.last_status and item.last_status != current_status:
-            item.last_status = current_status
-            if current_status == "LIVE": # Giả định DONE khi từ DIE sang LIVE hoặc ngược lại tùy logic bạn
-                item.done_at = datetime.datetime.now()
-                
-                msg = (
-                    f"✅ **DONE kèo:** `{item.uid}`\n"
-                    f"👤 Khách hàng: {item.customer_name}\n"
-                    f"📅 Ngày nhận: {item.created_at.strftime('%d/%m/%Y')}\n"
-                    f"🏁 Ngày DONE: {item.done_at.strftime('%d/%m/%Y')}\n"
-                    f"💰 Số tiền: {item.price:,.0f} VND"
-                )
-                await context.bot.send_message(chat_id=item.added_by, text=msg, parse_mode="Markdown")
+    async with httpx.AsyncClient() as client:
+        for item in active_uids:
+            # Giả lập check qua 1 service hoặc graph api
+            # Ở đây tôi dùng placeholder logic
+            current_status = "LIVE" # Logic check thực tế của bạn ở đây
             
-            session.commit()
-    session.close()
+            if item.last_status != current_status:
+                old_status = item.last_status
+                item.last_status = current_status
+                
+                if current_status == "LIVE":
+                    item.done_at = datetime.datetime.now()
+                    msg = (
+                        f"✅ **DONE kèo:** `{item.uid}`\n"
+                        f"👤 Khách: {item.customer_name}\n"
+                        f"📅 Nhận: {item.created_at.strftime('%d/%m/%Y')}\n"
+                        f"💰 Tiền: {item.price:,.0f}"
+                    )
+                    await context.bot.send_message(chat_id=item.added_by, text=msg, parse_mode="Markdown")
+                db.commit()
+    db.close()
 
-async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
-    session = Session()
-    now = datetime.datetime.now()
-    # Logic lấy data tháng vừa qua và xuất Excel
-    # (Phần này sẽ tạo file .xlsx bằng pandas và gửi cho ADMIN_ID)
-    file_path = f"report_{now.strftime('%m_%Y')}.xlsx"
-    # ... code pandas to excel ...
-    await context.bot.send_document(chat_id=ADMIN_ID, document=open(file_path, 'rb'), caption=f"Báo cáo tháng {now.month}")
-    session.close()
-
-# --- COMMAND HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔥 Hệ thống theo dõi UID Facebook Professional.\nVui lòng nhập KEY để sử dụng.")
-
+# --- HANDLERS ---
 async def add_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not check_key_valid(user_id):
-        return await update.message.reply_text("❌ Key hết hạn hoặc không tồn tại.")
+    if not is_valid_user(user_id):
+        return await update.message.reply_text("❌ Bạn không có Key hoặc Key hết hạn.")
     
     try:
-        # Format: /add_uid <uid> <tên> <tiền>
-        data = context.args
-        uid, name, price = data[0], data[1], float(data[2])
-        
-        session = Session()
-        new_uid = FacebookUID(uid=uid, customer_name=name, price=price, added_by=user_id, last_status="DIE")
-        session.add(new_uid)
-        session.commit()
-        session.close()
-        await update.message.reply_text(f"🚀 Đã thêm UID {uid} vào hệ thống theo dõi.")
-    except Exception as e:
-        await update.message.reply_text("⚠️ Sai cú pháp: /add_uid <uid> <tên_khách> <số_tiền>")
+        uid, name, price = context.args[0], context.args[1], float(context.args[2])
+        db = SessionLocal()
+        new_item = FacebookUID(uid=uid, customer_name=name, price=price, added_by=user_id)
+        db.add(new_item)
+        db.commit()
+        db.close()
+        await update.message.reply_text(f"🚀 Đã thêm UID: {uid}")
+    except:
+        await update.message.reply_text("⚠️ HD: /add_uid <uid> <tên> <tiền>")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    session = Session()
-    total = session.query(FacebookUID).filter(FacebookUID.added_by == user_id, FacebookUID.is_active == True).count()
-    live = session.query(FacebookUID).filter(FacebookUID.added_by == user_id, FacebookUID.is_active == True, FacebookUID.last_status == "LIVE").count()
-    die = total - live
-    
-    await update.message.reply_text(f"📊 **Trạng thái hiện tại:**\n- Tổng: {total}\n- LIVE: {live}\n- DIE: {die}", parse_mode="Markdown")
-    session.close()
+    db = SessionLocal()
+    items = db.query(FacebookUID).filter(FacebookUID.added_by == user_id, FacebookUID.is_active == True).all()
+    live = len([i for i in items if i.last_status == "LIVE"])
+    await update.message.reply_text(f"📊 Đang theo dõi: {len(items)}\n🟢 LIVE: {live}\n🔴 DIE: {len(items)-live}")
+    db.close()
 
-async def stats_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = Session()
-    today = datetime.datetime.now().date()
-    done_today = session.query(FacebookUID).filter(
-        FacebookUID.added_by == user_id, 
-        func.date(FacebookUID.done_at) == today
-    ).all()
-    
-    total_revenue = sum(item.price for item in done_today)
-    await update.message.reply_text(f"💰 **Hôm nay:**\n- Kèo DONE: {len(done_today)}\n- Doanh thu: {total_revenue:,.0f} VND", parse_mode="Markdown")
-    session.close()
-
-# --- ADMIN COMMANDS ---
-async def create_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- ADMIN: EXCEL REPORT ---
+async def export_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    try:
-        days = int(context.args[0])
-        new_key_code = f"KEY-{datetime.datetime.now().timestamp()}"
-        session = Session()
-        new_key = UserKey(key_code=new_key_code, expire_at=datetime.datetime.now() + datetime.timedelta(days=days))
-        session.add(new_key)
-        session.commit()
-        await update.message.reply_text(f"🔑 Đã tạo Key: `{new_key_code}` ({days} ngày)", parse_mode="Markdown")
-        session.close()
-    except:
-        await update.message.reply_text("Cú pháp: /create_key <số_ngày>")
-
-# --- MAIN RUNNER ---
-def main():
-    application = Application.builder().token(TOKEN).build()
-
-    # Job Queue
-    job_queue = application.job_queue
-    job_queue.run_repeating(monitor_job, interval=60, first=10) # Mỗi 60s
+    db = SessionLocal()
+    data = db.query(FacebookUID).all()
     
-    # Register Handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("add_uid", add_uid))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("stats_today", stats_today))
-    application.add_handler(CommandHandler("create_key", create_key))
-    # ... thêm các command còn lại tương tự ...
+    df_detail = pd.DataFrame([{
+        'UID': i.uid, 'Khách': i.customer_name, 'Tiền': i.price, 
+        'Ngày Nhận': i.created_at, 'Ngày Done': i.done_at, 'Status': i.last_status
+    } for i in data])
 
-    # RUN POLLING - KHÔNG DÙNG await/asyncio.run() ở đây theo chuẩn PTB v20
-    print("Bot is running...")
-    application.run_polling(drop_pending_updates=True)
+    file_name = "Bao_Cao_Doanh_Thu.xlsx"
+    with pd.ExcelWriter(file_name) as writer:
+        df_detail.to_excel(writer, sheet_name='Chi Tiet', index=False)
+        # Sheet 1: Tổng kết
+        summary = pd.DataFrame([{
+            'Tổng UID': len(data),
+            'Tổng Doanh Thu': df_detail['Tiền'].sum()
+        }])
+        summary.to_excel(writer, sheet_name='Tong Ket', index=False)
+
+    await update.message.reply_document(document=open(file_name, 'rb'))
+    db.close()
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+    
+    # Job check mỗi 60 giây
+    app.job_queue.run_repeating(check_uids_job, interval=60, first=10)
+    
+    app.add_handler(CommandHandler("add_uid", add_uid))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("export", export_report))
+    
+    print("Bot is starting...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
