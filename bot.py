@@ -21,8 +21,8 @@ def health(): return "SYSTEM_ACTIVE", 200
 threading.Thread(target=lambda: web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080))), daemon=True).start()
 
 # ==================== 2. CONFIG & DB ====================
-TOKEN = "8388735235:AAEq-u7EuXROgfdBfucJYaQlAg9LlOfSO0k"
-ADMIN_ID = 123456789  # <--- THAY ID CỦA BẠN
+TOKEN = "8388735235:AAGvuqNIoCvcDpy7T7TGPMWYX8CATm83Jp4"
+ADMIN_ID = 5522878843  # <--- THAY ID CỦA BẠN
 DB_FILE = "fb_pro_v23.db"
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
