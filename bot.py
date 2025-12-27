@@ -911,7 +911,20 @@ class FBBot:
             await self.show_uid_list(update, context)
 
 
-    
+    async def add_uid_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.message.reply_text("📝 Nhập theo định dạng: `UID | Tên KH | Số tiền | Trạng thái` (Gõ /cancel để hủy)")
+        return 1  # Trạng thái ADDING_UID
+
+    async def show_uid_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        conn = Database.get_conn()
+        uids = conn.execute("SELECT uid, status FROM uids WHERE user_id = (SELECT id FROM users WHERE telegram_id=?)", (user_id,)).fetchall()
+        conn.close()
+        msg = "📋 *DANH SÁCH UID:*\n" + "\n".join([f"- `{r[0]}`: {r[1]}" for r in uids]) if uids else "📭 Trống"
+        await update.callback_query.message.edit_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=Keyboards.main_menu())
+
+
     async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Hiển thị trạng thái qua callback"""
         user_id = update.effective_user.id
@@ -1224,20 +1237,19 @@ class FBBot:
         )
     
     # ==================== SETUP ====================
-    def setup_handlers(self):
-        """Thiết lập các command handler mới"""
-        # Command mới
+  def setup_handlers(self):
+        # Luồng thêm UID
+        conv_handler = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.add_uid_start, pattern="^add_uid$")],
+            states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_uid_input)]},
+            fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+        )
+        self.application.add_handler(conv_handler)
+        
+        # Các handler cũ giữ nguyên
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("stats", self.stats_command))
-        self.application.add_handler(CommandHandler("stats_today", self.stats_today_command))
-        self.application.add_handler(CommandHandler("stats_week", self.stats_week_command))
-        self.application.add_handler(CommandHandler("stats_month", self.stats_month_command))
-        self.application.add_handler(CommandHandler("report_month", self.manual_monthly_report))
-        
-        # Callback handler
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
-        
-        # Command cũ (giữ lại)
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
     
